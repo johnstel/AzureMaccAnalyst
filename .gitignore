@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Streamlit user uploads (ephemeral)
+finops_app/data/uploads/
+
+# PyInstaller build artifacts (intermediate)
+finops_app/build/
+finops_app/dist/
+finops_app/*.spec
+finops_app/*.exe
+
+# Log files
+logs/
+*.log
+
+# Releases — allow the zip in releases/
+!releases/
+!releases/*.zip
+
+# Data exports — keep the README, ignore actual data files
+data/exports/*.csv
