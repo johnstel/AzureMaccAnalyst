@@ -5,6 +5,8 @@ import os
 import sys
 from datetime import datetime
 
+APP_VERSION = "1.1.0"
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -237,7 +239,7 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.markdown("### Azure MACC Analyst")
-    st.caption("FinOps Cost & Commitment Analysis")
+    st.caption(f"FinOps Cost & Commitment Analysis  ·  v{APP_VERSION}")
     st.markdown("<hr style='border-color:#2E75B6; margin:8px 0;'>", unsafe_allow_html=True)
 
     signed_in = "credential" in st.session_state
