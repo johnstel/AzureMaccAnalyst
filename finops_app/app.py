@@ -125,8 +125,13 @@ def _pick_file() -> str | None:
         root.withdraw()
         root.attributes("-topmost", True)
         path = filedialog.askopenfilename(
-            title="Select Azure Invoice CSV",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Select Azure Invoice Export",
+            filetypes=[
+                ("Supported files", "*.csv;*.xlsx;*.xls;*.xlsm"),
+                ("CSV files", "*.csv"),
+                ("Excel files", "*.xlsx;*.xls;*.xlsm"),
+                ("All files", "*.*"),
+            ],
         )
         root.destroy()
         return path if path else None
@@ -244,14 +249,14 @@ st.markdown(
 # ═══════════════════════════════════════════════════════════════════════════════
 st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 st.markdown("### 1 &nbsp;&nbsp; Invoice Export", unsafe_allow_html=True)
-st.caption("Select your Azure invoice-detail CSV. Large files (5 GB+) are streamed and memory-safe.")
+st.caption("Select your Azure invoice-detail CSV or Excel file. Large files (5 GB+) are streamed and memory-safe.")
 
 col_path, col_browse, col_analyze = st.columns([5, 1, 1])
 with col_path:
     selected_file = st.text_input(
-        "CSV file path",
+        "Invoice file path",
         value=st.session_state.get("csv_path", ""),
-        placeholder=r"C:\Exports\invoice-detail.csv",
+        placeholder=r"C:\Exports\invoice-detail.csv  or  .xlsx",
         label_visibility="collapsed",
     )
 with col_browse:
@@ -268,7 +273,7 @@ if selected_file:
 
 if analyze_clicked:
     if not selected_file:
-        st.warning("Select a CSV file first.")
+        st.warning("Select an invoice file first.")
     else:
         with st.spinner("Scanning invoice export…"):
             try:
@@ -352,11 +357,11 @@ is_demo = st.session_state.get("demo_mode", False)
 
 # ── Demo-mode enrichment ───────────────────────────────────────────────────────
 if is_demo:
-    st.info("**Demo Mode** — Simulated RI/SP data will be generated from your invoice CSV.")
+    st.info("**Demo Mode** — Simulated RI/SP data will be generated from your invoice file.")
     if st.button("Generate Demo Data", type="primary"):
         csv_path = st.session_state.get("csv_path", "")
         if not csv_path:
-            st.warning("Load an invoice CSV first (Step 1).")
+            st.warning("Load an invoice file first (Step 1).")
         else:
             with st.spinner("Generating simulated Azure data…"):
                 try:

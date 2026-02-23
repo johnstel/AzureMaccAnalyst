@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 
 @dataclass
 class AnalysisSummary:
-    period_start: date | None
-    period_end: date | None
+    period_start: date | datetime | None
+    period_end: date | datetime | None
     currency: str
     total_cost: float
     total_quantity: float

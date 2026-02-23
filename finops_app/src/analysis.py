@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict
-from datetime import date
-from pathlib import Path
+from datetime import date, datetime
 from typing import Any
 
 import polars as pl
 
+from .file_loader import existing_columns, load_invoice_file, safe_datetime_expr
 from .logging_config import get_logger
 from .models import AnalysisSummary, AzureRecommendation, CommitmentItem
 
@@ -39,19 +39,14 @@ REQUIRED_COLUMNS = [
 def summarize_export(file_path: str) -> tuple[AnalysisSummary, dict[str, pl.DataFrame]]:
     logger.info("summarize_export: starting analysis of %s", file_path)
     t0 = time.perf_counter()
-    path = Path(file_path)
-    if not path.exists():
-        logger.error("File not found: %s", file_path)
-        raise FileNotFoundError(f"File not found: {file_path}")
-    logger.debug("File size: %.2f MB", path.stat().st_size / (1024 * 1024))
 
-    scan = pl.scan_csv(file_path, infer_schema_length=5000, ignore_errors=True)
-    existing = _existing_columns(scan)
+    scan = load_invoice_file(file_path)
+    existing = existing_columns(scan)
     selected = [column for column in REQUIRED_COLUMNS if column in existing]
 
     if not selected:
-        logger.error("CSV has no expected Azure invoice columns. Found: %s", existing)
-        raise ValueError("CSV file does not contain expected Azure invoice detail columns.")
+        logger.error("File has no expected Azure invoice columns. Found: %s", existing)
+        raise ValueError("File does not contain expected Azure invoice detail columns.")
     logger.debug("Selected %d of %d required columns: %s", len(selected), len(REQUIRED_COLUMNS), selected)
 
     typed = scan.select(selected).with_columns(
@@ -60,7 +55,7 @@ def summarize_export(file_path: str) -> tuple[AnalysisSummary, dict[str, pl.Data
             pl.col("Quantity").cast(pl.Float64, strict=False)
             if "Quantity" in selected
             else pl.lit(0.0).alias("Quantity"),
-            pl.col("Date").str.to_date(strict=False) if "Date" in selected else pl.lit(None).alias("Date"),
+            safe_datetime_expr("Date", scan) if "Date" in selected else pl.lit(None).alias("Date"),
         ]
     )
 
@@ -100,8 +95,8 @@ def summarize_export(file_path: str) -> tuple[AnalysisSummary, dict[str, pl.Data
 
     row = summary_df.to_dicts()[0]
     summary = AnalysisSummary(
-        period_start=row.get("period_start") if isinstance(row.get("period_start"), date) else None,
-        period_end=row.get("period_end") if isinstance(row.get("period_end"), date) else None,
+        period_start=row.get("period_start") if isinstance(row.get("period_start"), (date, datetime)) else None,
+        period_end=row.get("period_end") if isinstance(row.get("period_end"), (date, datetime)) else None,
         currency=row.get("currency") or "USD",
         total_cost=float(row.get("total_cost") or 0.0),
         total_quantity=float(row.get("total_quantity") or 0.0),
@@ -199,13 +194,9 @@ def build_savings_analysis(
         file_path, len(recommendations), augmented_annual_paygo,
     )
     t0 = time.perf_counter()
-    path = Path(file_path)
-    if not path.exists():
-        logger.error("File not found for savings analysis: %s", file_path)
-        raise FileNotFoundError(file_path)
 
-    scan = pl.scan_csv(file_path, infer_schema_length=5000, ignore_errors=True)
-    existing = _existing_columns(scan)
+    scan = load_invoice_file(file_path)
+    existing = existing_columns(scan)
 
     cost_col = "Cost" if "Cost" in existing else None
     if cost_col is None:
@@ -222,7 +213,7 @@ def build_savings_analysis(
         pl.col("Cost").cast(pl.Float64, strict=False),
     )
     if "Date" in cols_needed:
-        lf = lf.with_columns(pl.col("Date").str.to_date(strict=False))
+        lf = lf.with_columns(safe_datetime_expr("Date", scan))
 
     df = lf.collect(streaming=True)
 
@@ -517,10 +508,6 @@ def _build_region_savings(
     return rows
 
 
-def _existing_columns(scan: pl.LazyFrame) -> set[str]:
-    return set(scan.collect_schema().names())
-
-
 def _build_summary_tables(typed: pl.LazyFrame, selected: list[str]) -> dict[str, pl.DataFrame]:
     tables: dict[str, pl.DataFrame] = {}
 
@@ -550,9 +537,11 @@ def _build_summary_tables(typed: pl.LazyFrame, selected: list[str]) -> dict[str,
 
     if "Date" in selected:
         tables["cost_by_day"] = (
-            typed.group_by("Date")
+            typed.with_columns(pl.col("Date").dt.date().alias("Day"))
+            .group_by("Day")
             .agg(pl.sum("Cost").alias("TotalCost"))
-            .sort("Date")
+            .sort("Day")
+            .rename({"Day": "Date"})
             .collect(streaming=True)
         )
 

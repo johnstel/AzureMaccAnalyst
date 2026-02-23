@@ -9,11 +9,11 @@ import hashlib
 import random
 import time
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Any
 
 import polars as pl
 
+from .file_loader import existing_columns, load_invoice_file, safe_datetime_expr
 from .logging_config import get_logger
 from .models import AzureRecommendation, CommitmentItem
 
@@ -83,23 +83,21 @@ def generate_demo_data(
     logger.info("Generating demo data from %s", file_path)
     t0 = time.perf_counter()
     rng = random.Random(_seed(file_path))
-    path = Path(file_path)
-    if not path.exists():
-        logger.error("File not found for demo generation: %s", file_path)
-        raise FileNotFoundError(file_path)
 
     # ── Read real invoice services ─────────────────────────────────────────────
-    scan = pl.scan_csv(file_path, infer_schema_length=5000, ignore_errors=True)
-    existing = set(scan.collect_schema().names())
+    scan = load_invoice_file(file_path)
+    existing = existing_columns(scan)
 
     cols = [c for c in ("MeterCategory", "MeterRegion", "Cost", "ConsumedService", "Date") if c in existing]
-    df = scan.select(cols).with_columns(
+    lf = scan.select(cols).with_columns(
         pl.col("Cost").cast(pl.Float64, strict=False) if "Cost" in cols else pl.lit(0.0).alias("Cost"),
-    ).collect(streaming=True)
+    )
+    if "Date" in cols:
+        lf = lf.with_columns(safe_datetime_expr("Date", scan))
+    df = lf.collect(streaming=True)
 
     # Period info
     if "Date" in df.columns:
-        df = df.with_columns(pl.col("Date").str.to_date(strict=False))
         dates = df["Date"].drop_nulls()
         period_days = max((dates.max() - dates.min()).days, 1) if len(dates) > 0 else 30  # type: ignore[operator]
     else:

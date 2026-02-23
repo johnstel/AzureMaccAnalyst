@@ -1,0 +1,4 @@
+date,costInBillingCurrency,quantity,billingCurrency,subscriptionId,subscriptionName,serviceFamily,meterCategory,meterSubcategory,meterRegion,consumedService,product,pricingModel,chargeType,resourceGroupName,resourceId,reservationId,reservationName,term
+2026-01-01,0.01,1,USD,sub1,MySub,Compute,VMs,A1,eastus,Microsoft.Compute,VM A1,OnDemand,Usage,rg1,r1,"","",""
+2026-01-02,0.009,1,USD,sub1,MySub,Compute,VMs,A1,eastus,Microsoft.Compute,VM A1,OnDemand,Usage,rg1,r1,"","",""
+2026-01-03,0.008,1,USD,sub1,MySub,Storage,Storage,Blob,eastus,Microsoft.Storage,Blob,OnDemand,Usage,rg1,r2,"","",""
