@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime
 
 try:
@@ -116,7 +117,86 @@ st.markdown(
 
 # ── Helper: native file dialog ────────────────────────────────────────────────
 def _pick_file() -> str | None:
-    """Open a Windows file dialog. Returns path string only — no file read."""
+    """Open a Windows file dialog. Returns path string only — no file read.
+
+    Uses the Win32 ``GetOpenFileNameW`` API via ctypes so the dialog works
+    reliably inside a PyInstaller-frozen executable (tkinter's Tcl/Tk runtime
+    often fails to load in frozen bundles).  Falls back to tkinter when not
+    running on Windows.
+    """
+    if sys.platform == "win32":
+        result = _pick_file_win32()
+        if result is not None:
+            return result
+    # Fallback: tkinter (dev / non-Windows)
+    return _pick_file_tk()
+
+
+def _pick_file_win32() -> str | None:
+    """Native Windows file dialog via ctypes — no tkinter dependency."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        OFN_FILEMUSTEXIST = 0x00001000
+        OFN_PATHMUSTEXIST = 0x00000800
+        OFN_NOCHANGEDIR   = 0x00000008
+
+        class OPENFILENAMEW(ctypes.Structure):
+            _fields_ = [
+                ("lStructSize",      wintypes.DWORD),
+                ("hwndOwner",        wintypes.HWND),
+                ("hInstance",        wintypes.HINSTANCE),
+                ("lpstrFilter",      wintypes.LPCWSTR),
+                ("lpstrCustomFilter", wintypes.LPWSTR),
+                ("nMaxCustFilter",   wintypes.DWORD),
+                ("nFilterIndex",     wintypes.DWORD),
+                ("lpstrFile",        wintypes.LPWSTR),
+                ("nMaxFile",         wintypes.DWORD),
+                ("lpstrFileTitle",   wintypes.LPWSTR),
+                ("nMaxFileTitle",    wintypes.DWORD),
+                ("lpstrInitialDir",  wintypes.LPCWSTR),
+                ("lpstrTitle",       wintypes.LPCWSTR),
+                ("Flags",            wintypes.DWORD),
+                ("nFileOffset",      wintypes.WORD),
+                ("nFileExtension",   wintypes.WORD),
+                ("lpstrDefExt",      wintypes.LPCWSTR),
+                ("lCustData",        wintypes.LPARAM),
+                ("lpfnHook",         ctypes.c_void_p),
+                ("lpTemplateName",   wintypes.LPCWSTR),
+                ("pvReserved",       ctypes.c_void_p),
+                ("dwReserved",       wintypes.DWORD),
+                ("FlagsEx",          wintypes.DWORD),
+            ]
+
+        # Filter pairs separated by \0, terminated with \0\0
+        filter_str = (
+            "Supported files\0*.csv;*.xlsx;*.xls;*.xlsm\0"
+            "CSV files\0*.csv\0"
+            "Excel files\0*.xlsx;*.xls;*.xlsm\0"
+            "All files\0*.*\0\0"
+        )
+
+        buf = ctypes.create_unicode_buffer(4096)
+
+        ofn = OPENFILENAMEW()
+        ofn.lStructSize    = ctypes.sizeof(OPENFILENAMEW)
+        ofn.hwndOwner      = None
+        ofn.lpstrFilter    = filter_str
+        ofn.lpstrFile      = ctypes.cast(buf, wintypes.LPWSTR)
+        ofn.nMaxFile       = 4096
+        ofn.lpstrTitle     = "Select Azure Invoice Export"
+        ofn.Flags          = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR
+
+        if ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(ofn)):
+            return buf.value or None
+        return None
+    except Exception:
+        return None
+
+
+def _pick_file_tk() -> str | None:
+    """Tkinter file dialog — works in dev mode and non-Windows platforms."""
     try:
         import tkinter as tk
         from tkinter import filedialog
