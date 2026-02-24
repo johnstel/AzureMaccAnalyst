@@ -1,0 +1,26 @@
+@using AzureMaccAnalyst.Models
+
+<div class="table-responsive mt-3">
+    <table class="table table-sm table-striped table-hover">
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th class="text-end">Total Cost</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var row in Rows)
+            {
+                <tr>
+                    <td>@row.Date.ToString("yyyy-MM-dd")</td>
+                    <td class="text-end">@Currency @row.TotalCost.ToString("N2")</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    [Parameter] public List<DailyPivotRow> Rows { get; set; } = new();
+    [Parameter] public string Currency { get; set; } = "USD";
+}

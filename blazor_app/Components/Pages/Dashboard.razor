@@ -1,0 +1,306 @@
+@page "/"
+@rendermode InteractiveServer
+@using AzureMaccAnalyst.Models
+@using AzureMaccAnalyst.Services
+@inject FileLoaderService Loader
+@inject AnalysisService Analysis
+@inject DemoDataService DemoData
+@inject DashboardState State
+@inject ILogger<Dashboard> Logger
+
+<PageTitle>Azure MACC Analyst</PageTitle>
+
+<!-- ═══════════ HEADER ═══════════ -->
+<div class="dashboard-header">
+    <h2>📊&nbsp; Azure Cost &amp; Commitment Dashboard</h2>
+    <span class="header-date">@DateTime.Now.ToString("dddd, MMMM dd, yyyy")</span>
+</div>
+
+<!-- ═══════════ STEP 1 — File Upload ═══════════ -->
+<section class="section">
+    <h3>1 &nbsp;&nbsp; Invoice Export</h3>
+    <p class="section-caption">Upload your Azure invoice-detail CSV or Excel file.</p>
+
+    <div class="upload-bar">
+        <InputFile OnChange="OnFileSelected" accept=".csv,.xlsx,.xls,.xlsm" class="form-control upload-input" />
+        <button class="btn btn-primary" @onclick="AnalyzeFile" disabled="@(State.IsLoading || State.Records.Count == 0)">
+            @if (State.IsLoading) { <span class="spinner-border spinner-border-sm me-1"></span> }
+            Analyze
+        </button>
+    </div>
+
+    @if (!string.IsNullOrEmpty(State.FileName))
+    {
+        <small class="text-muted">Loaded: @State.FileName (@State.Records.Count records)</small>
+    }
+
+    @if (!string.IsNullOrEmpty(State.ErrorMessage))
+    {
+        <div class="alert alert-danger mt-2">@State.ErrorMessage</div>
+    }
+</section>
+
+<!-- ═══════════ KPI Strip ═══════════ -->
+@if (State.HasSummary)
+{
+    var s = State.Summary!;
+    <div class="kpi-strip">
+        <div class="kpi-card"><label>Total Spend</label><div class="kpi-value">@s.Currency @s.TotalCost.ToString("N2")</div></div>
+        <div class="kpi-card"><label>Line Items</label><div class="kpi-value">@s.RecordCount.ToString("N0")</div></div>
+        <div class="kpi-card"><label>Period Start</label><div class="kpi-value">@(s.PeriodStart?.ToString("yyyy-MM-dd") ?? "—")</div></div>
+        <div class="kpi-card"><label>Period End</label><div class="kpi-value">@(s.PeriodEnd?.ToString("yyyy-MM-dd") ?? "—")</div></div>
+    </div>
+
+    <!-- ═══════════ Pivot Tabs ═══════════ -->
+    <section class="section">
+        <div class="tab-bar">
+            <button class="tab-btn @(activeTab == "service" ? "active" : "")" @onclick='() => activeTab = "service"'>By Service</button>
+            <button class="tab-btn @(activeTab == "subscription" ? "active" : "")" @onclick='() => activeTab = "subscription"'>By Subscription</button>
+            <button class="tab-btn @(activeTab == "charge" ? "active" : "")" @onclick='() => activeTab = "charge"'>By Charge Type</button>
+            <button class="tab-btn @(activeTab == "daily" ? "active" : "")" @onclick='() => activeTab = "daily"'>Daily Trend</button>
+        </div>
+
+        @if (State.Pivots is not null)
+        {
+            @if (activeTab == "service")
+            {
+                <PivotTable Rows="State.Pivots.CostByServiceFamily" LabelHeader="Service Family" Currency="@s.Currency" />
+            }
+            else if (activeTab == "subscription")
+            {
+                <PivotTable Rows="State.Pivots.CostBySubscription" LabelHeader="Subscription" Currency="@s.Currency" />
+            }
+            else if (activeTab == "charge")
+            {
+                <PivotTable Rows="State.Pivots.CostByChargeType" LabelHeader="Charge Type" Currency="@s.Currency" />
+            }
+            else if (activeTab == "daily")
+            {
+                <DailyTrendTable Rows="State.Pivots.CostByDay" Currency="@s.Currency" />
+            }
+        }
+    </section>
+}
+
+<!-- ═══════════ STEP 2 — Demo Enrichment ═══════════ -->
+<section class="section">
+    <h3>2 &nbsp;&nbsp; Azure Enrichment</h3>
+    <p class="section-caption">Generate simulated RI / Savings Plan data from your invoice (Demo Mode).</p>
+
+    @if (State.Records.Count > 0)
+    {
+        <button class="btn btn-primary" @onclick="GenerateDemoData" disabled="@State.IsLoading">
+            @if (State.IsLoading) { <span class="spinner-border spinner-border-sm me-1"></span> }
+            Generate Demo Data
+        </button>
+    }
+    else
+    {
+        <div class="alert alert-info">Load an invoice file first (Step 1).</div>
+    }
+</section>
+
+@if (State.HasEnrichment)
+{
+    var rs = State.RecommendationSummary!;
+    var ccy = State.Summary?.Currency ?? "USD";
+    <div class="kpi-strip">
+        <div class="kpi-card"><label>Active Commitments</label><div class="kpi-value">@rs["ActiveCommitments"]</div></div>
+        <div class="kpi-card"><label>Expiring ≤ 90 Days</label><div class="kpi-value">@rs["CommitmentsExpiringWithin90Days"]</div></div>
+        <div class="kpi-card"><label>Advisor Recommendations</label><div class="kpi-value">@rs["AdvisorCostRecommendationCount"]</div></div>
+        <div class="kpi-card"><label>Est. Annual Savings</label><div class="kpi-value">@ccy @($"{(double)rs["AdvisorEstimatedAnnualSavings"]:N2}")</div></div>
+    </div>
+}
+
+<!-- ═══════════ Savings Analysis ═══════════ -->
+@if (State.SavingsAnalysis is not null)
+{
+    var sa = State.SavingsAnalysis;
+    var kpi = sa.Kpi;
+    var ccy = State.Summary?.Currency ?? "USD";
+
+    <section class="section">
+        <h3>💰 &nbsp; Pay-Go vs RI / SP Savings Projection</h3>
+        <p class="section-caption">
+            Based on @sa.PeriodDays-day invoice run rate extrapolated to 3 years,
+            combined with @kpi.TotalRecommendations Azure Advisor recommendations.
+        </p>
+
+        <div class="kpi-strip kpi-strip-5">
+            <div class="kpi-card"><label>Current 3-Yr Spend (PAYG)</label><div class="kpi-value">@ccy @kpi.Current3YrSpend.ToString("N2")</div></div>
+            <div class="kpi-card"><label>RI/SP 3-Yr Cost</label><div class="kpi-value">@ccy @kpi.RiSp3YrCost.ToString("N2")</div></div>
+            <div class="kpi-card"><label>Total 3-Year Savings</label><div class="kpi-value">@ccy @kpi.Total3YrSavings.ToString("N2")</div></div>
+            <div class="kpi-card"><label>Savings %</label><div class="kpi-value">@kpi.SavingsPercent.ToString("F1")%</div></div>
+            <div class="kpi-card"><label>Annual Savings</label><div class="kpi-value">@ccy @kpi.AnnualSavings.ToString("N2")</div></div>
+        </div>
+
+        <div class="tab-bar">
+            <button class="tab-btn @(savingsTab == "category" ? "active" : "")" @onclick='() => savingsTab = "category"'>By Resource Type</button>
+            <button class="tab-btn @(savingsTab == "region" ? "active" : "")" @onclick='() => savingsTab = "region"'>By Region</button>
+            <button class="tab-btn @(savingsTab == "opportunities" ? "active" : "")" @onclick='() => savingsTab = "opportunities"'>Top Opportunities</button>
+        </div>
+
+        @if (savingsTab == "category")
+        {
+            <SavingsCategoryTable Rows="sa.SavingsByCategory" Currency="@ccy" />
+        }
+        else if (savingsTab == "region")
+        {
+            <SavingsRegionTable Rows="sa.SavingsByRegion" Currency="@ccy" />
+        }
+        else if (savingsTab == "opportunities")
+        {
+            <TopOpportunitiesTable Rows="sa.TopOpportunities" Currency="@ccy" />
+        }
+    </section>
+}
+
+<!-- ═══════════ Commitment / Advisor Details ═══════════ -->
+@if (State.Commitments.Count > 0)
+{
+    <section class="section">
+        <details>
+            <summary class="details-summary">Reserved Instances &amp; Savings Plans (@State.Commitments.Count)</summary>
+            <div class="table-responsive">
+                <table class="table table-sm table-striped">
+                    <thead><tr><th>Source</th><th>Name</th><th>Term</th><th>State</th><th>Start</th><th>End</th><th>Days Rem.</th><th>Scope</th></tr></thead>
+                    <tbody>
+                        @foreach (var c in State.Commitments)
+                        {
+                            <tr>
+                                <td>@c.Source</td><td>@c.Name</td><td>@c.Term</td><td>@c.State</td>
+                                <td>@c.StartDate</td><td>@c.EndDate</td><td>@c.DaysRemaining</td><td>@c.Scope</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </details>
+    </section>
+}
+
+@if (State.Recommendations.Count > 0)
+{
+    <section class="section">
+        <details>
+            <summary class="details-summary">Advisor Cost Recommendations (@State.Recommendations.Count)</summary>
+            <div class="table-responsive">
+                <table class="table table-sm table-striped">
+                    <thead><tr><th>Category</th><th>Impact</th><th>Description</th><th class="text-end">Annual Savings</th><th>Resource ID</th></tr></thead>
+                    <tbody>
+                        @foreach (var r in State.Recommendations)
+                        {
+                            <tr>
+                                <td>@r.Category</td><td>@r.Impact</td><td>@r.ShortDescription</td>
+                                <td class="text-end">$@r.AnnualSavingsEstimate.ToString("N2")</td>
+                                <td class="text-truncate" style="max-width:200px;" title="@r.ResourceId">@r.ResourceId</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </details>
+    </section>
+}
+
+@code {
+    private string activeTab = "service";
+    private string savingsTab = "category";
+    private IBrowserFile? selectedFile;
+
+    private async Task OnFileSelected(InputFileChangeEventArgs e)
+    {
+        selectedFile = e.File;
+        State.ErrorMessage = null;
+        State.IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            // Read stream into memory (Blazor Server streams from browser)
+            using var ms = new MemoryStream();
+            await using var stream = selectedFile.OpenReadStream(maxAllowedSize: 500 * 1024 * 1024); // 500 MB
+            await stream.CopyToAsync(ms);
+            ms.Position = 0;
+
+            State.Records = Loader.LoadInvoiceFile(ms, selectedFile.Name);
+            State.FileName = selectedFile.Name;
+            Logger.LogInformation("File uploaded: {Name}, {Count} records", selectedFile.Name, State.Records.Count);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load file");
+            State.ErrorMessage = $"Failed to load file: {ex.Message}";
+        }
+        finally
+        {
+            State.IsLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private void AnalyzeFile()
+    {
+        if (State.Records.Count == 0) return;
+
+        State.IsLoading = true;
+        State.ErrorMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            var (summary, pivots) = Analysis.Summarise(State.Records);
+            State.Summary = summary;
+            State.Pivots = pivots;
+            Logger.LogInformation("Analysis complete: {Cost:F2} {Ccy}, {Count} records",
+                summary.TotalCost, summary.Currency, summary.RecordCount);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Analysis failed");
+            State.ErrorMessage = $"Analysis failed: {ex.Message}";
+        }
+        finally
+        {
+            State.IsLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private void GenerateDemoData()
+    {
+        if (State.Records.Count == 0) return;
+
+        State.IsLoading = true;
+        State.ErrorMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            var demo = DemoData.Generate(State.Records);
+            State.Recommendations = demo.Recommendations;
+            State.Commitments = demo.Commitments;
+            State.IsDemoMode = true;
+
+            State.RecommendationSummary = AnalysisService.BuildRecommendationSummary(
+                demo.Recommendations, demo.Commitments);
+
+            State.SavingsAnalysis = Analysis.BuildSavingsAnalysis(
+                State.Records, demo.Recommendations, demo.FullAnnualPayGo);
+
+            State.Warnings = ["Demo mode — all Azure data is simulated."];
+            Logger.LogInformation("Demo data generated: {Recs} recommendations, {Comms} commitments",
+                demo.Recommendations.Count, demo.Commitments.Count);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Demo generation failed");
+            State.ErrorMessage = $"Demo generation failed: {ex.Message}";
+        }
+        finally
+        {
+            State.IsLoading = false;
+            StateHasChanged();
+        }
+    }
+}
