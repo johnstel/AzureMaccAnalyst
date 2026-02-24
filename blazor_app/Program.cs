@@ -12,6 +12,7 @@ builder.Services.AddScoped<AnalysisService>();
 builder.Services.AddScoped<DemoDataService>();
 builder.Services.AddScoped<DashboardState>();
 builder.Services.AddScoped<AzureAuthService>();
+builder.Services.AddScoped<CopilotChatService>();
 
 var app = builder.Build();
 

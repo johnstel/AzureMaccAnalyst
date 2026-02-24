@@ -23,8 +23,9 @@
     <p class="section-caption">Upload your Azure invoice-detail CSV or Excel file. Large files (5 GB+) are streamed and memory-safe.</p>
 
     <div class="upload-bar">
-        <InputFile OnChange="OnFileSelected" accept=".csv,.xlsx,.xls,.xlsm" class="form-control upload-input" />
-        <button class="btn btn-outline-secondary" disabled>Browse…</button>
+        <InputFile OnChange="OnFileSelected" accept=".csv,.xlsx,.xls,.xlsm" class="form-control upload-input" id="invoiceFileInput" />
+        <button class="btn btn-outline-secondary" type="button"
+                onclick="document.getElementById('invoiceFileInput').click()">Browse…</button>
         <button class="btn btn-primary btn-analyze" @onclick="AnalyzeFile" disabled="@(State.IsLoading || State.Records.Count == 0)">
             @if (State.IsLoading) { <span class="spinner-border spinner-border-sm me-1"></span> }
             Analyze
@@ -284,10 +285,14 @@
     </section>
 }
 
+<!-- ═══════════ AI Chat Panel ═══════════ -->
+<ChatPanel @bind-IsOpen="chatOpen" />
+
 @code {
     private string activeTab = "service";
     private string savingsTab = "category";
     private IBrowserFile? selectedFile;
+    private bool chatOpen = false;
 
     private async Task OnFileSelected(InputFileChangeEventArgs e)
     {
