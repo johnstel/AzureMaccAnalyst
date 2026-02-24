@@ -17,13 +17,15 @@
 </div>
 
 <!-- ═══════════ STEP 1 — File Upload ═══════════ -->
+<hr class="section-divider" />
 <section class="section">
     <h3>1 &nbsp;&nbsp; Invoice Export</h3>
-    <p class="section-caption">Upload your Azure invoice-detail CSV or Excel file.</p>
+    <p class="section-caption">Upload your Azure invoice-detail CSV or Excel file. Large files (5 GB+) are streamed and memory-safe.</p>
 
     <div class="upload-bar">
         <InputFile OnChange="OnFileSelected" accept=".csv,.xlsx,.xls,.xlsm" class="form-control upload-input" />
-        <button class="btn btn-primary" @onclick="AnalyzeFile" disabled="@(State.IsLoading || State.Records.Count == 0)">
+        <button class="btn btn-outline-secondary" disabled>Browse…</button>
+        <button class="btn btn-primary btn-analyze" @onclick="AnalyzeFile" disabled="@(State.IsLoading || State.Records.Count == 0)">
             @if (State.IsLoading) { <span class="spinner-border spinner-border-sm me-1"></span> }
             Analyze
         </button>
@@ -31,7 +33,7 @@
 
     @if (!string.IsNullOrEmpty(State.FileName))
     {
-        <small class="text-muted">Loaded: @State.FileName (@State.Records.Count records)</small>
+        <small class="text-muted">Loaded: @State.FileName &nbsp;(@State.Records.Count.ToString("N0") records)</small>
     }
 
     @if (!string.IsNullOrEmpty(State.ErrorMessage))
@@ -44,14 +46,16 @@
 @if (State.HasSummary)
 {
     var s = State.Summary!;
+    var ccy = s.Currency;
     <div class="kpi-strip">
-        <div class="kpi-card"><label>Total Spend</label><div class="kpi-value">@s.Currency @s.TotalCost.ToString("N2")</div></div>
+        <div class="kpi-card"><label>Total Spend</label><div class="kpi-value">@ccy @s.TotalCost.ToString("N2")</div></div>
         <div class="kpi-card"><label>Line Items</label><div class="kpi-value">@s.RecordCount.ToString("N0")</div></div>
         <div class="kpi-card"><label>Period Start</label><div class="kpi-value">@(s.PeriodStart?.ToString("yyyy-MM-dd") ?? "—")</div></div>
         <div class="kpi-card"><label>Period End</label><div class="kpi-value">@(s.PeriodEnd?.ToString("yyyy-MM-dd") ?? "—")</div></div>
     </div>
 
     <!-- ═══════════ Pivot Tabs ═══════════ -->
+    <hr class="section-divider" />
     <section class="section">
         <div class="tab-bar">
             <button class="tab-btn @(activeTab == "service" ? "active" : "")" @onclick='() => activeTab = "service"'>By Service</button>
@@ -64,31 +68,72 @@
         {
             @if (activeTab == "service")
             {
-                <PivotTable Rows="State.Pivots.CostByServiceFamily" LabelHeader="Service Family" Currency="@s.Currency" />
+                <div class="chart-table-row">
+                    <div class="chart-col">
+                        <BarChart Labels="@State.Pivots.CostByServiceFamily.Select(r => r.Label).ToArray()"
+                                  Data="@State.Pivots.CostByServiceFamily.Select(r => r.TotalCost).ToArray()"
+                                  ChartLabel="Cost by Service" />
+                    </div>
+                    <div class="table-col">
+                        <PivotTable Rows="State.Pivots.CostByServiceFamily" LabelHeader="Service Family" Currency="@ccy" />
+                    </div>
+                </div>
             }
             else if (activeTab == "subscription")
             {
-                <PivotTable Rows="State.Pivots.CostBySubscription" LabelHeader="Subscription" Currency="@s.Currency" />
+                <div class="chart-table-row">
+                    <div class="chart-col">
+                        <BarChart Labels="@State.Pivots.CostBySubscription.Select(r => r.Label).ToArray()"
+                                  Data="@State.Pivots.CostBySubscription.Select(r => r.TotalCost).ToArray()"
+                                  ChartLabel="Cost by Subscription" />
+                    </div>
+                    <div class="table-col">
+                        <PivotTable Rows="State.Pivots.CostBySubscription" LabelHeader="Subscription" Currency="@ccy" />
+                    </div>
+                </div>
             }
             else if (activeTab == "charge")
             {
-                <PivotTable Rows="State.Pivots.CostByChargeType" LabelHeader="Charge Type" Currency="@s.Currency" />
+                <div class="chart-table-row">
+                    <div class="chart-col">
+                        <BarChart Labels="@State.Pivots.CostByChargeType.Select(r => r.Label).ToArray()"
+                                  Data="@State.Pivots.CostByChargeType.Select(r => r.TotalCost).ToArray()"
+                                  ChartLabel="Cost by Charge Type" />
+                    </div>
+                    <div class="table-col">
+                        <PivotTable Rows="State.Pivots.CostByChargeType" LabelHeader="Charge Type" Currency="@ccy" />
+                    </div>
+                </div>
             }
             else if (activeTab == "daily")
             {
-                <DailyTrendTable Rows="State.Pivots.CostByDay" Currency="@s.Currency" />
+                <div class="chart-table-row">
+                    <div class="chart-col">
+                        <BarChart Labels="@State.Pivots.CostByDay.Select(r => r.Date.ToString("yyyy-MM-dd")).ToArray()"
+                                  Data="@State.Pivots.CostByDay.Select(r => r.TotalCost).ToArray()"
+                                  ChartLabel="Daily Cost"
+                                  ChartType="line" />
+                    </div>
+                    <div class="table-col">
+                        <DailyTrendTable Rows="State.Pivots.CostByDay" Currency="@ccy" />
+                    </div>
+                </div>
             }
         }
     </section>
 }
 
 <!-- ═══════════ STEP 2 — Demo Enrichment ═══════════ -->
+<hr class="section-divider" />
 <section class="section">
     <h3>2 &nbsp;&nbsp; Azure Enrichment</h3>
-    <p class="section-caption">Generate simulated RI / Savings Plan data from your invoice (Demo Mode).</p>
+    <p class="section-caption">Pull live RI / Savings Plan inventory, Advisor cost recommendations, and Cost Management data.</p>
 
     @if (State.Records.Count > 0)
     {
+        <div class="alert alert-info">
+            <strong>Demo Mode</strong> — Simulated RI/SP data will be generated from your invoice file.
+        </div>
         <button class="btn btn-primary" @onclick="GenerateDemoData" disabled="@State.IsLoading">
             @if (State.IsLoading) { <span class="spinner-border spinner-border-sm me-1"></span> }
             Generate Demo Data
@@ -100,6 +145,7 @@
     }
 </section>
 
+<!-- ═══════════ Enrichment KPIs ═══════════ -->
 @if (State.HasEnrichment)
 {
     var rs = State.RecommendationSummary!;
@@ -108,8 +154,20 @@
         <div class="kpi-card"><label>Active Commitments</label><div class="kpi-value">@rs["ActiveCommitments"]</div></div>
         <div class="kpi-card"><label>Expiring ≤ 90 Days</label><div class="kpi-value">@rs["CommitmentsExpiringWithin90Days"]</div></div>
         <div class="kpi-card"><label>Advisor Recommendations</label><div class="kpi-value">@rs["AdvisorCostRecommendationCount"]</div></div>
-        <div class="kpi-card"><label>Est. Annual Savings</label><div class="kpi-value">@ccy @($"{(double)rs["AdvisorEstimatedAnnualSavings"]:N2}")</div></div>
+        <div class="kpi-card"><label>Est. Annual Savings</label><div class="kpi-value">@($"{ccy} {(double)rs["AdvisorEstimatedAnnualSavings"]:N2}")</div></div>
     </div>
+}
+
+<!-- ═══════════ Warnings ═══════════ -->
+@if (State.Warnings.Count > 0)
+{
+    <details class="mb-3">
+        <summary class="details-summary">⚠️ Azure data warnings</summary>
+        @foreach (var w in State.Warnings)
+        {
+            <div class="alert alert-warning py-1 px-3 mb-1">@w</div>
+        }
+    </details>
 }
 
 <!-- ═══════════ Savings Analysis ═══════════ -->
@@ -119,6 +177,7 @@
     var kpi = sa.Kpi;
     var ccy = State.Summary?.Currency ?? "USD";
 
+    <hr class="section-divider" />
     <section class="section">
         <h3>💰 &nbsp; Pay-Go vs RI / SP Savings Projection</h3>
         <p class="section-caption">
@@ -129,9 +188,9 @@
         <div class="kpi-strip kpi-strip-5">
             <div class="kpi-card"><label>Current 3-Yr Spend (PAYG)</label><div class="kpi-value">@ccy @kpi.Current3YrSpend.ToString("N2")</div></div>
             <div class="kpi-card"><label>RI/SP 3-Yr Cost</label><div class="kpi-value">@ccy @kpi.RiSp3YrCost.ToString("N2")</div></div>
-            <div class="kpi-card"><label>Total 3-Year Savings</label><div class="kpi-value">@ccy @kpi.Total3YrSavings.ToString("N2")</div></div>
-            <div class="kpi-card"><label>Savings %</label><div class="kpi-value">@kpi.SavingsPercent.ToString("F1")%</div></div>
-            <div class="kpi-card"><label>Annual Savings</label><div class="kpi-value">@ccy @kpi.AnnualSavings.ToString("N2")</div></div>
+            <div class="kpi-card"><label>Total 3-Year Savings</label><div class="kpi-value savings-value">@ccy @kpi.Total3YrSavings.ToString("N2")</div></div>
+            <div class="kpi-card"><label>Savings %</label><div class="kpi-value savings-value">@kpi.SavingsPercent.ToString("F1")%</div></div>
+            <div class="kpi-card"><label>Annual Savings</label><div class="kpi-value savings-value">@ccy @kpi.AnnualSavings.ToString("N2")</div></div>
         </div>
 
         <div class="tab-bar">
@@ -142,11 +201,33 @@
 
         @if (savingsTab == "category")
         {
-            <SavingsCategoryTable Rows="sa.SavingsByCategory" Currency="@ccy" />
+            <div class="chart-table-row">
+                <div class="chart-col">
+                    @{ var catRows = sa.SavingsByCategory.Where(r => r.NetSavings3Yr > 0).Take(15).ToList(); }
+                    <BarChart Labels="@catRows.Select(r => r.ResourceType).ToArray()"
+                              Data="@catRows.Select(r => r.NetSavings3Yr).ToArray()"
+                              ChartLabel="Net Savings (3-Yr)"
+                              Color="#27AE60" />
+                </div>
+                <div class="table-col">
+                    <SavingsCategoryTable Rows="sa.SavingsByCategory" Currency="@ccy" />
+                </div>
+            </div>
         }
         else if (savingsTab == "region")
         {
-            <SavingsRegionTable Rows="sa.SavingsByRegion" Currency="@ccy" />
+            <div class="chart-table-row">
+                <div class="chart-col">
+                    @{ var rgnRows = sa.SavingsByRegion.Where(r => r.NetSavings3Yr > 0).ToList(); }
+                    <BarChart Labels="@rgnRows.Select(r => r.Region).ToArray()"
+                              Data="@rgnRows.Select(r => r.NetSavings3Yr).ToArray()"
+                              ChartLabel="Net Savings (3-Yr)"
+                              Color="#27AE60" />
+                </div>
+                <div class="table-col">
+                    <SavingsRegionTable Rows="sa.SavingsByRegion" Currency="@ccy" />
+                </div>
+            </div>
         }
         else if (savingsTab == "opportunities")
         {
@@ -162,7 +243,7 @@
         <details>
             <summary class="details-summary">Reserved Instances &amp; Savings Plans (@State.Commitments.Count)</summary>
             <div class="table-responsive">
-                <table class="table table-sm table-striped">
+                <table class="table table-sm table-striped table-hover">
                     <thead><tr><th>Source</th><th>Name</th><th>Term</th><th>State</th><th>Start</th><th>End</th><th>Days Rem.</th><th>Scope</th></tr></thead>
                     <tbody>
                         @foreach (var c in State.Commitments)
@@ -185,7 +266,7 @@
         <details>
             <summary class="details-summary">Advisor Cost Recommendations (@State.Recommendations.Count)</summary>
             <div class="table-responsive">
-                <table class="table table-sm table-striped">
+                <table class="table table-sm table-striped table-hover">
                     <thead><tr><th>Category</th><th>Impact</th><th>Description</th><th class="text-end">Annual Savings</th><th>Resource ID</th></tr></thead>
                     <tbody>
                         @foreach (var r in State.Recommendations)
@@ -217,9 +298,8 @@
 
         try
         {
-            // Read stream into memory (Blazor Server streams from browser)
             using var ms = new MemoryStream();
-            await using var stream = selectedFile.OpenReadStream(maxAllowedSize: 500 * 1024 * 1024); // 500 MB
+            await using var stream = selectedFile.OpenReadStream(maxAllowedSize: 500 * 1024 * 1024);
             await stream.CopyToAsync(ms);
             ms.Position = 0;
 

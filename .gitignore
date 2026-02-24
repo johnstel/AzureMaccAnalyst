@@ -34,9 +34,15 @@ finops_app/*.exe
 logs/
 *.log
 
+# .NET build artifacts
+bin/
+obj/
+*.user
+
 # Releases — allow the zip in releases/
 !releases/
 !releases/*.zip
 
 # Data exports — keep the README, ignore actual data files
 data/exports/*.csv
+*.sln
