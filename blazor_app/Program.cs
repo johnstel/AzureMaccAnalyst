@@ -11,6 +11,7 @@ builder.Services.AddScoped<FileLoaderService>();
 builder.Services.AddScoped<AnalysisService>();
 builder.Services.AddScoped<DemoDataService>();
 builder.Services.AddScoped<DashboardState>();
+builder.Services.AddScoped<AzureAuthService>();
 
 var app = builder.Build();
 
