@@ -370,24 +370,39 @@ if analyze_clicked:
     if not selected_file:
         st.warning("Select an invoice file first.")
     else:
-        with st.spinner("Scanning invoice export…"):
-            try:
-                logger.info("User clicked Analyze for file: %s", selected_file)
-                analysis_file = selected_file
-                if Path(selected_file).suffix.lower() in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
-                    analysis_file = convert_excel_to_csv(selected_file)
-                    st.session_state["csv_path"] = analysis_file
-                    logger.info("Excel input converted. Using CSV for analysis: %s", analysis_file)
+        try:
+            logger.info("User clicked Analyze for file: %s", selected_file)
+            analysis_file = selected_file
 
+            if Path(selected_file).suffix.lower() in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
+                # ── Excel → intermediate conversion with live progress bar ──
+                progress_bar = st.progress(0, text="Converting Excel… preparing")
+
+                def _update_progress(rows_done: int, total_est: int) -> None:
+                    frac = min(rows_done / max(total_est, 1), 1.0)
+                    progress_bar.progress(
+                        frac,
+                        text=f"Converting Excel… {rows_done:,} / ~{total_est:,} rows",
+                    )
+
+                analysis_file = convert_excel_to_csv(
+                    selected_file, progress=_update_progress,
+                )
+                progress_bar.progress(1.0, text="Conversion complete ✓")
+                st.session_state["csv_path"] = analysis_file
+                logger.info("Excel input converted. Using %s for analysis: %s",
+                            Path(analysis_file).suffix, analysis_file)
+
+            with st.spinner("Analysing invoice data…"):
                 summary_obj, pivots = summarize_export(analysis_file)
                 st.session_state["summary"] = summary_to_dict(summary_obj)
                 st.session_state["pivots"] = pivots
                 logger.info("Invoice analysis completed successfully")
                 st.toast("Invoice analysis complete.", icon="✅")
                 st.rerun()
-            except Exception as ex:
-                logger.exception("Invoice analysis failed for %s", selected_file)
-                st.error(f"Analysis failed: {ex}")
+        except Exception as ex:
+            logger.exception("Invoice analysis failed for %s", selected_file)
+            st.error(f"Analysis failed: {ex}")
 
 # ── KPI strip ──────────────────────────────────────────────────────────────────
 if "summary" in st.session_state:

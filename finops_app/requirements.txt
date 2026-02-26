@@ -6,3 +6,8 @@ azure-identity>=1.20.0
 requests>=2.32.3
 python-dateutil>=2.9.0.post0
 python-dotenv>=1.0.1
+
+# Optional: faster Excel parsing + smaller intermediate files
+# Install these for best large-xlsx performance:
+pyarrow>=14.0.0
+fastexcel>=0.11.0
