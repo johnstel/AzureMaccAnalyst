@@ -151,9 +151,14 @@ _CSV_EXTENSIONS = {".csv", ".tsv", ".txt"}
 
 def _max_excel_size_mb() -> int:
     try:
-        return max(1, int(os.getenv("AZURE_MAX_EXCEL_MB", "500")))
+        return max(1, int(os.getenv("AZURE_MAX_EXCEL_MB", "8192")))
     except ValueError:
-        return 500
+        return 8192
+
+
+def _block_oversized_excel() -> bool:
+    raw = os.getenv("AZURE_BLOCK_OVERSIZED_EXCEL", "false").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def load_invoice_file(file_path: str) -> pl.LazyFrame:
@@ -177,16 +182,17 @@ def load_invoice_file(file_path: str) -> pl.LazyFrame:
         size_mb = path.stat().st_size / (1024 * 1024)
         max_excel_mb = _max_excel_size_mb()
         if size_mb > max_excel_mb:
-            logger.warning(
-                "Excel file exceeds configured size limit: %.1f MB > %d MB (%s)",
-                size_mb,
-                max_excel_mb,
-                file_path,
+            msg = (
+                f"Excel file is {size_mb:,.1f} MB, above configured threshold {max_excel_mb} MB. "
+                "Conversion may run CPU-intensive for a while."
             )
-            raise ValueError(
-                f"Excel file is {size_mb:,.1f} MB, which exceeds the configured limit of {max_excel_mb} MB. "
-                "For very large inputs, export or convert to CSV and analyze that file instead."
-            )
+            if _block_oversized_excel():
+                logger.warning("%s Blocking is enabled. (%s)", msg, file_path)
+                raise ValueError(
+                    msg
+                    + " Oversized Excel blocking is enabled. Set AZURE_BLOCK_OVERSIZED_EXCEL=false to allow conversion."
+                )
+            logger.warning("%s Continuing conversion. (%s)", msg, file_path)
         lf = _load_excel(file_path)
     elif ext in _CSV_EXTENSIONS or ext == "":
         lf = _load_csv(file_path)
