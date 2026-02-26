@@ -18,6 +18,14 @@ _ARM_BASE = "https://management.azure.com"
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
+def is_throttling_exception(ex: Exception) -> bool:
+    if isinstance(ex, requests.HTTPError):
+        status = ex.response.status_code if ex.response is not None else None
+        return status == 429
+    msg = str(ex).lower()
+    return "throttl" in msg or "too many requests" in msg or "http 429" in msg
+
+
 def _api_version(name: str, default: str) -> str:
     return os.getenv(name, default)
 
@@ -70,13 +78,28 @@ def _request_with_retries(
             status = ex.response.status_code if ex.response is not None else None
             is_retryable = status in _RETRYABLE_STATUS_CODES
             if not is_retryable or attempt >= attempts:
+                if status == 429:
+                    logger.warning(
+                        "%s %s is being throttled by Azure and retries are exhausted (%d attempts).",
+                        method,
+                        url,
+                        attempts,
+                    )
                 raise
-            delay = base_delay * (2 ** (attempt - 1))
+            retry_after_header = ex.response.headers.get("Retry-After") if ex.response is not None else None
+            retry_after: float | None = None
+            if retry_after_header:
+                try:
+                    retry_after = float(retry_after_header)
+                except ValueError:
+                    retry_after = None
+            delay = retry_after if retry_after is not None and retry_after > 0 else base_delay * (2 ** (attempt - 1))
+            reason = "throttled by Azure" if status == 429 else f"HTTP {status}"
             logger.warning(
-                "%s %s failed with HTTP %s (attempt %d/%d). Retrying in %.1fs",
+                "%s %s failed (%s, attempt %d/%d). Retrying in %.1fs",
                 method,
                 url,
-                status,
+                reason,
                 attempt,
                 attempts,
                 delay,

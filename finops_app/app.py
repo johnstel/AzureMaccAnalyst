@@ -35,6 +35,7 @@ from src.azure_auth import (
     load_auth_config,
 )
 from src.azure_clients import (
+    is_throttling_exception,
     list_advisor_cost_recommendations,
     list_reservations,
     list_savings_plans,
@@ -68,6 +69,16 @@ def _extract_identity(token: str) -> dict[str, str]:
         }
     except Exception:
         return {"name": "", "email": "Unknown"}
+
+
+def _azure_warning(label: str, ex: Exception, subscription_id: str | None = None) -> str:
+    if is_throttling_exception(ex):
+        if subscription_id:
+            return f"{label} ({subscription_id[:8]}…): Azure is throttling requests. Retried automatically; partial results may be shown."
+        return f"{label}: Azure is throttling requests. Retried automatically; partial results may be shown."
+    if subscription_id:
+        return f"{label} ({subscription_id[:8]}…): {ex}"
+    return f"{label}: {ex}"
 
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -497,7 +508,7 @@ if not is_demo and st.button("Fetch Azure Data", type="primary", disabled=not si
         except Exception as ex:
             reservations = []
             logger.warning("Failed to list reservations: %s", ex)
-            warnings.append(f"Reservations: {ex}")
+            warnings.append(_azure_warning("Reservations", ex))
 
         # Savings Plans
         progress.progress(40, text="Fetching savings plans…")
@@ -506,7 +517,7 @@ if not is_demo and st.button("Fetch Azure Data", type="primary", disabled=not si
         except Exception as ex:
             savings_plans = []
             logger.warning("Failed to list savings plans: %s", ex)
-            warnings.append(f"Savings Plans: {ex}")
+            warnings.append(_azure_warning("Savings Plans", ex))
 
         commitments = reservations + savings_plans
 
@@ -518,7 +529,7 @@ if not is_demo and st.button("Fetch Azure Data", type="primary", disabled=not si
                 all_recs.extend(list_advisor_cost_recommendations(credential, sid))
             except Exception as ex:
                 logger.warning("Failed Advisor query for subscription %s: %s", sid, ex)
-                warnings.append(f"Advisor ({sid[:8]}…): {ex}")
+                warnings.append(_azure_warning("Advisor", ex, sid))
 
         # Cost Management queries (all subscriptions)
         progress.progress(80, text="Running Cost Management queries…")
@@ -538,7 +549,7 @@ if not is_demo and st.button("Fetch Azure Data", type="primary", disabled=not si
                     )
                 except Exception as ex:
                     logger.warning("Cost query failed for subscription %s: %s", sid, ex)
-                    warnings.append(f"Cost query ({sid[:8]}…): {ex}")
+                    warnings.append(_azure_warning("Cost query", ex, sid))
 
         st.session_state["commitments"] = commitment_rows(commitments)
         st.session_state["recommendations"] = recommendation_rows(all_recs)
