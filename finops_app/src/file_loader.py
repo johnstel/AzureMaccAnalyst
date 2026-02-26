@@ -600,7 +600,7 @@ def safe_datetime_expr(col_name: str, lf: pl.LazyFrame) -> pl.Expr:
 
     * Already Datetime → returned as-is.
     * Date → cast to Datetime (midnight).
-    * String → parsed with ISO-8601 (``%Y-%m-%dT%H:%M:%S`` then ``%Y-%m-%d``).
+    * String → parsed with multiple common timestamp/date formats.
     """
     dtype = lf.collect_schema()[col_name]
     if dtype == pl.Date:
@@ -609,16 +609,20 @@ def safe_datetime_expr(col_name: str, lf: pl.LazyFrame) -> pl.Expr:
         return pl.col(col_name)
     if str(dtype).startswith("Datetime"):
         return pl.col(col_name)
-    # String column — try full ISO timestamp first, then date-only
+    # String column — try broad inference first, then common explicit formats.
+    raw = pl.col(col_name).cast(pl.Utf8, strict=False).str.strip_chars()
     return (
-        pl.col(col_name)
-        .str.to_datetime("%Y-%m-%dT%H:%M:%S", strict=False)
-        .fill_null(
-            pl.col(col_name)
-            .str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False)
-        )
-        .fill_null(
-            pl.col(col_name)
-            .str.to_datetime("%Y-%m-%d", strict=False)
-        )
+        raw.str.to_datetime(strict=False)
+        .fill_null(raw.str.to_datetime("%Y-%m-%dT%H:%M:%S", strict=False))
+        .fill_null(raw.str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False))
+        .fill_null(raw.str.to_datetime("%Y-%m-%d", strict=False))
+        .fill_null(raw.str.to_datetime("%m/%d/%Y %H:%M:%S", strict=False))
+        .fill_null(raw.str.to_datetime("%m/%d/%Y %H:%M", strict=False))
+        .fill_null(raw.str.to_datetime("%m/%d/%Y %I:%M:%S %p", strict=False))
+        .fill_null(raw.str.to_datetime("%m/%d/%Y", strict=False))
+        .fill_null(raw.str.to_datetime("%d/%m/%Y %H:%M:%S", strict=False))
+        .fill_null(raw.str.to_datetime("%d/%m/%Y %H:%M", strict=False))
+        .fill_null(raw.str.to_datetime("%d/%m/%Y", strict=False))
+        .fill_null(raw.str.to_datetime("%m-%d-%Y", strict=False))
+        .fill_null(raw.str.to_datetime("%d-%m-%Y", strict=False))
     )

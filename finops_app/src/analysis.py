@@ -538,6 +538,7 @@ def _build_summary_tables(typed: pl.LazyFrame, selected: list[str]) -> dict[str,
     if "Date" in selected:
         tables["cost_by_day"] = (
             typed.with_columns(pl.col("Date").dt.date().alias("Day"))
+            .filter(pl.col("Day").is_not_null())
             .group_by("Day")
             .agg(pl.sum("Cost").alias("TotalCost"))
             .sort("Day")
