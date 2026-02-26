@@ -271,7 +271,8 @@ def build_savings_analysis(
 
     # Current PAYG cost per MeterCategory
     if "MeterCategory" in df.columns:
-        cat_costs = dict(
+        cat_costs: dict[str, float] = {}
+        for meter_category, total_cost in (
             df.filter(
                 pl.col("PricingModel").is_in(["OnDemand", "On Demand", "PAYG", "Pay-As-You-Go", ""])
                 if "PricingModel" in df.columns
@@ -280,7 +281,9 @@ def build_savings_analysis(
             .group_by("MeterCategory")
             .agg(pl.sum("Cost"))
             .iter_rows()
-        )
+        ):
+            key = str(meter_category or "Unspecified")
+            cat_costs[key] = float(total_cost or 0.0)
     else:
         cat_costs = {"All Services": paygo_total}
 

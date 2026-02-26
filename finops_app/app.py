@@ -36,6 +36,7 @@ from src.azure_auth import (
     load_auth_config,
 )
 from src.azure_clients import (
+    is_authorization_exception,
     is_throttling_exception,
     list_advisor_cost_recommendations,
     list_reservations,
@@ -78,6 +79,10 @@ def _azure_warning(label: str, ex: Exception, subscription_id: str | None = None
         if subscription_id:
             return f"{label} ({subscription_id[:8]}…): Azure is throttling requests. Retried automatically; partial results may be shown."
         return f"{label}: Azure is throttling requests. Retried automatically; partial results may be shown."
+    if is_authorization_exception(ex):
+        if subscription_id:
+            return f"{label} ({subscription_id[:8]}…): Access denied (RBAC/permissions). Continuing with partial results."
+        return f"{label}: Access denied (RBAC/permissions). Continuing with partial results."
     if subscription_id:
         return f"{label} ({subscription_id[:8]}…): {ex}"
     return f"{label}: {ex}"
@@ -515,14 +520,23 @@ if not is_demo and st.button("Fetch Azure Data", type="primary", disabled=not si
     progress = st.progress(0, text="Discovering subscriptions…")
     try:
         logger.info("Starting Azure data enrichment")
-        subs = list_subscriptions(credential)
+        try:
+            subs = list_subscriptions(credential)
+        except Exception as ex:
+            subs = []
+            logger.warning("Failed to list subscriptions: %s", ex)
+            warnings = [_azure_warning("Subscriptions", ex)]
+        else:
+            warnings: list[str] = []
+
         env_ids = os.getenv("AZURE_SUBSCRIPTION_IDS", "").strip()
         sub_ids = [i.strip() for i in env_ids.split(",") if i.strip()]
         if not sub_ids:
             sub_ids = [s["subscriptionId"] for s in subs if s.get("subscriptionId")]
         logger.info("Operating on %d subscriptions", len(sub_ids))
 
-        warnings: list[str] = []
+        if not sub_ids:
+            warnings.append("Subscriptions: No accessible subscriptions found. Azure enrichment will continue for tenant-level endpoints only.")
 
         # Reservations
         progress.progress(20, text="Fetching reservations…")

@@ -26,6 +26,21 @@ def is_throttling_exception(ex: Exception) -> bool:
     return "throttl" in msg or "too many requests" in msg or "http 429" in msg
 
 
+def is_authorization_exception(ex: Exception) -> bool:
+    if isinstance(ex, requests.HTTPError):
+        status = ex.response.status_code if ex.response is not None else None
+        return status in {401, 403}
+    msg = str(ex).lower()
+    return (
+        "forbidden" in msg
+        or "unauthorized" in msg
+        or "permission" in msg
+        or "access denied" in msg
+        or "http 401" in msg
+        or "http 403" in msg
+    )
+
+
 def _api_version(name: str, default: str) -> str:
     return os.getenv(name, default)
 
