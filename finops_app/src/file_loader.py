@@ -149,6 +149,13 @@ _EXCEL_EXTENSIONS = {".xlsx", ".xls", ".xlsm", ".xlsb"}
 _CSV_EXTENSIONS = {".csv", ".tsv", ".txt"}
 
 
+def _max_excel_size_mb() -> int:
+    try:
+        return max(1, int(os.getenv("AZURE_MAX_EXCEL_MB", "500")))
+    except ValueError:
+        return 500
+
+
 def load_invoice_file(file_path: str) -> pl.LazyFrame:
     """Load an Azure invoice export and return a normalised Polars LazyFrame.
 
@@ -167,6 +174,19 @@ def load_invoice_file(file_path: str) -> pl.LazyFrame:
                 file_path, ext, path.stat().st_size / (1024 * 1024))
 
     if ext in _EXCEL_EXTENSIONS:
+        size_mb = path.stat().st_size / (1024 * 1024)
+        max_excel_mb = _max_excel_size_mb()
+        if size_mb > max_excel_mb:
+            logger.warning(
+                "Excel file exceeds configured size limit: %.1f MB > %d MB (%s)",
+                size_mb,
+                max_excel_mb,
+                file_path,
+            )
+            raise ValueError(
+                f"Excel file is {size_mb:,.1f} MB, which exceeds the configured limit of {max_excel_mb} MB. "
+                "For very large inputs, export or convert to CSV and analyze that file instead."
+            )
         lf = _load_excel(file_path)
     elif ext in _CSV_EXTENSIONS or ext == "":
         lf = _load_csv(file_path)

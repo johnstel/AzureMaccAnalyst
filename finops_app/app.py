@@ -342,7 +342,7 @@ st.markdown(
 # ═══════════════════════════════════════════════════════════════════════════════
 st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 st.markdown("### 1 &nbsp;&nbsp; Invoice Export", unsafe_allow_html=True)
-st.caption("Select your Azure invoice-detail CSV or Excel file. Large files (5 GB+) are streamed and memory-safe.")
+st.caption("Select your Azure invoice-detail CSV or Excel file. For very large inputs, prefer CSV; oversized Excel files are blocked by a safety limit.")
 
 col_path, col_browse, col_analyze = st.columns([5, 1, 1])
 with col_path:
