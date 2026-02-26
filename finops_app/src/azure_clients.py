@@ -107,7 +107,13 @@ def _get(credential: TokenCredential, url: str, params: dict[str, Any] | None = 
     return response.json()
 
 
-def _get_all_pages(credential: TokenCredential, url: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def _get_all_pages(
+    credential: TokenCredential,
+    url: str,
+    params: dict[str, Any] | None = None,
+    *,
+    allow_partial_on_error: bool = False,
+) -> list[dict[str, Any]]:
     """Follow nextLink pagination and collect all items from 'value' arrays."""
     all_items: list[dict[str, Any]] = []
     next_url: str | None = url
@@ -117,7 +123,19 @@ def _get_all_pages(credential: TokenCredential, url: str, params: dict[str, Any]
     while next_url:
         page += 1
         logger.debug("GET page %d: %s params=%s", page, next_url, next_params)
-        response = _request_with_retries("GET", credential, next_url, params=next_params, timeout=60)
+        try:
+            response = _request_with_retries("GET", credential, next_url, params=next_params, timeout=60)
+        except requests.RequestException as ex:
+            if allow_partial_on_error and all_items:
+                logger.warning(
+                    "Paginated GET %s failed on page %d after collecting %d items. Returning partial results. Error: %s",
+                    url,
+                    page,
+                    len(all_items),
+                    ex,
+                )
+                break
+            raise
         logger.debug("GET page %d -> %s", page, response.status_code)
         payload = response.json()
         items = payload.get("value", [])
@@ -219,7 +237,12 @@ def list_advisor_cost_recommendations(
     logger.info("Listing Advisor cost recommendations for subscription %s", subscription_id)
     api_version = _api_version("AZURE_API_VERSION_ADVISOR", "2023-01-01")
     url = f"{_ARM_BASE}/subscriptions/{subscription_id}/providers/Microsoft.Advisor/recommendations"
-    all_recs = _get_all_pages(credential, url, params={"api-version": api_version})
+    all_recs = _get_all_pages(
+        credential,
+        url,
+        params={"api-version": api_version},
+        allow_partial_on_error=True,
+    )
     logger.debug("Raw Advisor results: %d (all categories)", len(all_recs))
 
     recs: list[AzureRecommendation] = []
