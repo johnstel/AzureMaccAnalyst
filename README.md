@@ -23,7 +23,8 @@ See [Desktop Distribution Guide](finops_app/README-exe.md) for full details, tro
 
 | Capability | Description |
 |---|---|
-| **Invoice Analysis** | Process Azure invoice-detail CSV exports (large-file aware via Polars lazy scan) |
+| **Invoice Analysis** | Process Azure invoice-detail CSV or Excel exports (large-file aware via Polars lazy scan) |
+| **Large Excel Support** | Tiered conversion: fastexcel (Rust, 10–50× faster) → openpyxl streaming → Parquet/CSV intermediate with live progress bar |
 | **Azure Enrichment** | Pull current Reserved Instances, Savings Plans, and cost data via Microsoft sign-in |
 | **Advisor Recommendations** | Surface Azure Advisor cost recommendations to support future purchase decisions |
 | **Excel Reporting** | Export a consolidated Excel workbook with summary, optimization, commitments, and more |
@@ -66,6 +67,8 @@ python -m venv .venv
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+> **Large Excel files?** The app handles multi-GB `.xlsx` exports automatically — see [Handling Large Excel Files](finops_app/README.md#handling-large-excel-files-1-gb) in the app README for full details. For best performance, ensure `fastexcel` and `pyarrow` are installed (both are in `requirements.txt` by default).
 
 ## Building the Desktop EXE
 

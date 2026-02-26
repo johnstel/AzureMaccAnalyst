@@ -1,7 +1,7 @@
 # Azure MACC Analyst App (Python)
 
 A finance-friendly Streamlit application to:
-- Process Azure invoice-detail CSV exports (large-file aware via Polars lazy scan)
+- Process Azure invoice-detail CSV or Excel exports (large-file aware via Polars lazy scan)
 - Connect to Azure securely with Microsoft sign-in
 - Pull current Reserved Instances and Savings Plans inventory
 - Pull Azure Advisor cost recommendations to support future purchase decisions
@@ -50,9 +50,71 @@ A finance-friendly Streamlit application to:
 - End users launch by double-clicking the `.exe`
 - See full details in `README-exe.md`
 
+---
+
+## Handling Large Excel Files (1 GB+)
+
+Azure invoice exports are often delivered as multi-GB `.xlsx` files. The app uses a **tiered conversion strategy** that automatically picks the fastest safe approach for the machine it's running on.
+
+### Conversion Tiers
+
+| Tier | Engine | Speed | Peak Memory | When Used |
+|------|--------|-------|-------------|-----------|
+| 1 | **fastexcel** (calamine / Rust) → Parquet | 10–50× faster | ~2–4 GB for a 5 GB xlsx | `fastexcel` installed, file fits in ≤80% available RAM |
+| 2 | **openpyxl streaming** → CSV → Parquet | Moderate | ~50 MB constant | `pyarrow` installed, but file too large for Tier 1 |
+| 3 | **openpyxl streaming** → CSV | Slowest | ~50 MB constant | Fallback when `pyarrow` is not installed |
+
+The app displays a **live progress bar** during conversion so users know exactly how far along the process is.
+
+### Installing fastexcel for best performance
+
+Both `fastexcel` and `pyarrow` are included in `requirements.txt` and installed by default. If you're working in a minimal environment:
+
+```bash
+pip install fastexcel pyarrow
+```
+
+That's it — the app detects them automatically on next run. No code or config changes needed.
+
+### How it works
+
+1. **First analysis of an `.xlsx` file**: the app converts it to an intermediate file (`.converted.parquet` or `.converted.csv`) saved next to the original.
+2. **Subsequent runs**: the cached intermediate is reused instantly if it's newer than the source `.xlsx` — no re-conversion.
+3. **Analysis**: Polars scans the intermediate file lazily (`pl.scan_parquet` or `pl.scan_csv`) with `.collect(streaming=True)`, keeping memory constant regardless of file size.
+
+### Configuration
+
+Set these in your environment or `.env` file:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AZURE_EXCEL_FAST_PATH` | `true` | Enable/disable the fastexcel (Rust) Tier 1 path. Set `false` to always use streaming. |
+| `AZURE_MAX_EXCEL_MB` | `8192` | Warning threshold for very large Excel files (in MB). |
+| `AZURE_BLOCK_OVERSIZED_EXCEL` | `false` | `true` = block files above threshold; `false` = warn and continue. |
+
+### Performance expectations (5 GB .xlsx, ~10M rows)
+
+| Scenario | Conversion Time | Intermediate Size | Analysis Time |
+|----------|----------------|-------------------|---------------|
+| Tier 1 (fastexcel → Parquet) | ~2–5 min | ~500 MB–1 GB | seconds |
+| Tier 2 (openpyxl → CSV → Parquet) | ~30–60 min | ~500 MB–1 GB | seconds |
+| Tier 3 (openpyxl → CSV) | ~30–60 min | ~3–5 GB | ~10–30 sec |
+| Cached re-analysis (any tier) | **0 sec** | reused | seconds |
+
+> **Recommendation:** For recurring analysis of the same file, the first conversion is a one-time cost. Subsequent runs are near-instant.
+
+### Memory safety
+
+The app checks available system RAM before attempting Tier 1:
+- **File < 1 GB compressed**: always tries fastexcel (low risk)
+- **File ≥ 1 GB compressed**: estimates decompressed size (~4× the `.xlsx` file size) and only uses fastexcel if it fits within 80% of available RAM
+- If fastexcel fails or is skipped, the app automatically falls back to openpyxl streaming with constant ~50 MB memory
+
+---
+
 ## Typical flow
 1. Sign in to Azure from the sidebar.
-2. Analyze an invoice-detail CSV (local export).
+2. Analyze an invoice-detail CSV or Excel file (local export).
 3. Fetch Azure enrichment (RI, SP, Advisor recommendations).
 4. Generate and download Excel workbook.
 
@@ -67,6 +129,7 @@ A finance-friendly Streamlit application to:
 - `Advisor`
 - `AzureCostQuery` (if available)
 
-## Notes for very large exports (10GB+)
-- Current implementation uses Polars lazy scanning to avoid full in-memory loading.
-- For production at very large scale, use staged aggregates in Fabric/Spark and point the app to summarized datasets.
+## Notes for very large exports (10 GB+)
+- The tiered conversion strategy handles files up to 8 GB by default.
+- For files beyond that, adjust `AZURE_MAX_EXCEL_MB` upward.
+- For production at very large scale, consider pre-converting to CSV or using staged aggregates in Fabric/Spark and pointing the app to summarised datasets.

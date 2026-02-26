@@ -47,6 +47,14 @@
 - To stop the app, close the console window.
 - If port 8501 is in use, Streamlit will pick another port — check the console output.
 
+### Working with large Excel files
+The app fully supports large Azure invoice `.xlsx` exports (up to several GB). Here's what to expect:
+
+- **First time you analyse an Excel file**: the app converts it to a faster format. A progress bar shows conversion progress. This is a one-time step — it may take a few minutes for very large files.
+- **After conversion**: a `.converted.parquet` (or `.converted.csv`) file is saved next to your original `.xlsx`. Subsequent analyses of the same file will be near-instant.
+- **Memory usage**: the app is designed to keep memory usage low (~50 MB) even for multi-GB files. On machines with plenty of RAM, it will automatically use a faster conversion engine.
+- **Tip**: if you receive both `.xlsx` and `.csv` versions of the same export, use the `.csv` — it's always faster to load directly.
+
 ### Troubleshooting
 | Issue | Fix |
 |-------|-----|
@@ -54,6 +62,8 @@
 | Browser shows "can't reach this page" | Wait a few more seconds; the server is still starting |
 | Azure sign-in fails | Ensure you can sign in at https://portal.azure.com with the same account |
 | "Access denied" on cost data | Ask your Azure admin to grant Cost Management Reader role |
+| Excel conversion seems stuck | Large files (5 GB+) can take 30–60 minutes on first run — watch the progress bar. The converted file is cached for future runs. |
+| "Analysis failed" on a large Excel | The file may exceed available memory. Try closing other applications, or ask your IT contact to pre-convert to CSV. |
 
 ---
 
