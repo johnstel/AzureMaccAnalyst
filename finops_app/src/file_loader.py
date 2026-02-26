@@ -264,6 +264,73 @@ def _excel_cell_to_csv(value):
     return value
 
 
+def _stream_excel_to_csv(file_path: str, csv_path: str) -> tuple[int, float]:
+    """Stream an Excel workbook into CSV.
+
+    Returns a tuple of ``(row_count, elapsed_seconds)``.
+    """
+    import time as _time
+    from openpyxl import load_workbook
+
+    t0 = _time.perf_counter()
+    wb = load_workbook(file_path, read_only=True, data_only=True)
+    ws = wb.active
+    if ws is None:
+        wb.close()
+        raise ValueError(f"Excel file has no active sheet: {file_path}")
+
+    headers: list[str] | None = None
+    row_count = 0
+    with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        for row in ws.iter_rows(values_only=True):
+            if headers is None:
+                headers = [str(h) if h is not None else f"_col{i}" for i, h in enumerate(row)]
+                writer.writerow(headers)
+                continue
+            writer.writerow([_excel_cell_to_csv(v) for v in row])
+            row_count += 1
+
+    wb.close()
+    if headers is None:
+        raise ValueError(f"Excel file is empty: {file_path}")
+
+    return row_count, (_time.perf_counter() - t0)
+
+
+def convert_excel_to_csv(file_path: str, output_path: str | None = None, *, overwrite: bool = False) -> str:
+    """Convert an Excel file to CSV and return the CSV path.
+
+    Conversion is streaming and suitable for large workbooks. By default, the
+    CSV is created next to the source workbook using ``<stem>.converted.csv``.
+    """
+    source = Path(file_path)
+    if source.suffix.lower() not in _EXCEL_EXTENSIONS:
+        raise ValueError(f"Expected an Excel file ({', '.join(sorted(_EXCEL_EXTENSIONS))}): {file_path}")
+
+    target = Path(output_path) if output_path else source.with_suffix(".converted.csv")
+
+    if target.exists() and not overwrite:
+        try:
+            if target.stat().st_size > 0 and target.stat().st_mtime >= source.stat().st_mtime:
+                logger.info("Reusing existing converted CSV: %s", str(target))
+                return str(target)
+        except OSError:
+            pass
+
+    logger.info("Converting Excel to CSV: %s -> %s", str(source), str(target))
+    row_count, elapsed = _stream_excel_to_csv(str(source), str(target))
+    size_mb = target.stat().st_size / (1024 * 1024)
+    logger.info(
+        "Excel conversion complete in %.1fs: %d rows, %.1f MB CSV (%s)",
+        elapsed,
+        row_count,
+        size_mb,
+        str(target),
+    )
+    return str(target)
+
+
 def _load_excel(file_path: str) -> pl.LazyFrame:
     """Stream an Excel file to a temporary CSV, then return a lazy scan.
 
@@ -273,16 +340,7 @@ def _load_excel(file_path: str) -> pl.LazyFrame:
       3. The temp CSV is handed to ``pl.scan_csv`` for lazy / streaming reads.
       4. The temp file is deleted when the process exits (via ``atexit``).
     """
-    import time as _time
-    from openpyxl import load_workbook
-
-    t0 = _time.perf_counter()
     logger.info("Streaming Excel → temp CSV: %s", file_path)
-    wb = load_workbook(file_path, read_only=True, data_only=True)
-    ws = wb.active
-    if ws is None:
-        wb.close()
-        raise ValueError(f"Excel file has no active sheet: {file_path}")
 
     # Create a temp CSV next to the original so it's on the same volume
     #   (avoids cross-drive copies).  Falls back to system temp dir.
@@ -294,27 +352,7 @@ def _load_excel(file_path: str) -> pl.LazyFrame:
     os.close(fd)
     _register_temp(tmp_path)
 
-    headers: list[str] | None = None
-    row_count = 0
-
-    with open(tmp_path, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.writer(fh)
-        for row in ws.iter_rows(values_only=True):
-            if headers is None:
-                # First row = headers
-                headers = [str(h) if h is not None else f"_col{i}" for i, h in enumerate(row)]
-                writer.writerow(headers)
-                continue
-            # Serialise datetime/date values to ISO strings so Polars can parse them
-            writer.writerow([_excel_cell_to_csv(v) for v in row])
-            row_count += 1
-
-    wb.close()
-
-    if headers is None:
-        raise ValueError(f"Excel file is empty: {file_path}")
-
-    elapsed = _time.perf_counter() - t0
+    row_count, elapsed = _stream_excel_to_csv(file_path, tmp_path)
     tmp_size_mb = os.path.getsize(tmp_path) / (1024 * 1024)
     logger.info(
         "Excel → CSV conversion done in %.1fs: %d data rows, %.1f MB temp file (%s)",

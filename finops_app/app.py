@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 
 APP_VERSION = "1.1.0"
 
@@ -44,6 +45,7 @@ from src.azure_clients import (
 )
 from src.demo_data import generate_demo_data
 from src.excel_export import build_excel_workbook
+from src.file_loader import convert_excel_to_csv
 
 
 # ── Helper: decode identity from JWT access token ─────────────────────────────
@@ -342,7 +344,7 @@ st.markdown(
 # ═══════════════════════════════════════════════════════════════════════════════
 st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 st.markdown("### 1 &nbsp;&nbsp; Invoice Export", unsafe_allow_html=True)
-st.caption("Select your Azure invoice-detail CSV or Excel file. For very large inputs, prefer CSV; oversized Excel files are blocked by a safety limit.")
+st.caption("Select your Azure invoice-detail CSV or Excel file. Excel inputs are converted to CSV automatically before analysis.")
 
 col_path, col_browse, col_analyze = st.columns([5, 1, 1])
 with col_path:
@@ -371,7 +373,13 @@ if analyze_clicked:
         with st.spinner("Scanning invoice export…"):
             try:
                 logger.info("User clicked Analyze for file: %s", selected_file)
-                summary_obj, pivots = summarize_export(selected_file)
+                analysis_file = selected_file
+                if Path(selected_file).suffix.lower() in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
+                    analysis_file = convert_excel_to_csv(selected_file)
+                    st.session_state["csv_path"] = analysis_file
+                    logger.info("Excel input converted. Using CSV for analysis: %s", analysis_file)
+
+                summary_obj, pivots = summarize_export(analysis_file)
                 st.session_state["summary"] = summary_to_dict(summary_obj)
                 st.session_state["pivots"] = pivots
                 logger.info("Invoice analysis completed successfully")
