@@ -15,10 +15,25 @@ logger = get_logger(__name__)
 
 _ARM_SCOPE = "https://management.azure.com/.default"
 _ARM_BASE = "https://management.azure.com"
+_RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 def _api_version(name: str, default: str) -> str:
     return os.getenv(name, default)
+
+
+def _max_retries() -> int:
+    try:
+        return max(0, int(os.getenv("AZURE_HTTP_MAX_RETRIES", "3")))
+    except ValueError:
+        return 3
+
+
+def _retry_base_seconds() -> float:
+    try:
+        return max(0.1, float(os.getenv("AZURE_HTTP_RETRY_BASE_SECONDS", "1.5")))
+    except ValueError:
+        return 1.5
 
 
 def _auth_header(credential: TokenCredential) -> dict[str, str]:
@@ -27,13 +42,68 @@ def _auth_header(credential: TokenCredential) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
+def _request_with_retries(
+    method: str,
+    credential: TokenCredential,
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    json_body: dict[str, Any] | None = None,
+    timeout: int = 60,
+) -> requests.Response:
+    attempts = _max_retries() + 1
+    base_delay = _retry_base_seconds()
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.request(
+                method,
+                url,
+                headers=_auth_header(credential),
+                params=params,
+                json=json_body,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            return response
+        except requests.HTTPError as ex:
+            status = ex.response.status_code if ex.response is not None else None
+            is_retryable = status in _RETRYABLE_STATUS_CODES
+            if not is_retryable or attempt >= attempts:
+                raise
+            delay = base_delay * (2 ** (attempt - 1))
+            logger.warning(
+                "%s %s failed with HTTP %s (attempt %d/%d). Retrying in %.1fs",
+                method,
+                url,
+                status,
+                attempt,
+                attempts,
+                delay,
+            )
+            time.sleep(delay)
+        except (requests.Timeout, requests.ConnectionError) as ex:
+            if attempt >= attempts:
+                raise
+            delay = base_delay * (2 ** (attempt - 1))
+            logger.warning(
+                "%s %s failed with %s (attempt %d/%d). Retrying in %.1fs",
+                method,
+                url,
+                type(ex).__name__,
+                attempt,
+                attempts,
+                delay,
+            )
+            time.sleep(delay)
+
+
 def _get(credential: TokenCredential, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     logger.debug("GET %s params=%s", url, params)
     t0 = time.perf_counter()
-    response = requests.get(url, headers=_auth_header(credential), params=params, timeout=60)
+    response = _request_with_retries("GET", credential, url, params=params, timeout=60)
     elapsed = time.perf_counter() - t0
     logger.debug("GET %s -> %s (%.2fs)", url, response.status_code, elapsed)
-    response.raise_for_status()
     return response.json()
 
 
@@ -47,9 +117,8 @@ def _get_all_pages(credential: TokenCredential, url: str, params: dict[str, Any]
     while next_url:
         page += 1
         logger.debug("GET page %d: %s params=%s", page, next_url, next_params)
-        response = requests.get(next_url, headers=_auth_header(credential), params=next_params, timeout=60)
+        response = _request_with_retries("GET", credential, next_url, params=next_params, timeout=60)
         logger.debug("GET page %d -> %s", page, response.status_code)
-        response.raise_for_status()
         payload = response.json()
         items = payload.get("value", [])
         all_items.extend(items)
@@ -107,7 +176,17 @@ def list_savings_plans(credential: TokenCredential) -> list[CommitmentItem]:
     logger.info("Listing savings plans")
     api_version = _api_version("AZURE_API_VERSION_SAVINGS_PLANS", "2022-11-01")
     url = f"{_ARM_BASE}/providers/Microsoft.BillingBenefits/savingsPlans"
-    plans = _get_all_pages(credential, url, params={"api-version": api_version})
+    try:
+        plans = _get_all_pages(credential, url, params={"api-version": api_version})
+    except requests.HTTPError as ex:
+        status = ex.response.status_code if ex.response is not None else None
+        if status == 403:
+            logger.warning(
+                "Savings Plans API returned 403 Forbidden. This typically means the signed-in identity "
+                "does not have BillingBenefits read permissions for savings plans. Continuing without savings plans data."
+            )
+            return []
+        raise
     logger.info("Found %d savings plans", len(plans))
 
     items: list[CommitmentItem] = []
@@ -189,16 +268,16 @@ def query_cost_by_service(
     }
 
     t0 = time.perf_counter()
-    response = requests.post(
+    response = _request_with_retries(
+        "POST",
+        credential,
         url,
-        headers=_auth_header(credential),
         params={"api-version": api_version},
-        json=body,
+        json_body=body,
         timeout=120,
     )
     elapsed = time.perf_counter() - t0
     logger.debug("POST %s -> %s (%.2fs)", url, response.status_code, elapsed)
-    response.raise_for_status()
     payload = response.json()
 
     properties = payload.get("properties", {})
