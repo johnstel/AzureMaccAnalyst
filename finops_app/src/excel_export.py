@@ -68,14 +68,34 @@ def build_excel_workbook(
 
     _write_executive_summary(wb, summary, recommendation_summary, pivots)
 
-    # RI / SP Savings sheets (placed right after Executive Summary)
-    if savings_analysis and (
-        savings_analysis.get("savings_by_category")
-        or savings_analysis.get("top_opportunities")
-    ):
-        _write_ri_sp_savings(wb, savings_analysis, summary)
-        _write_savings_by_region(wb, savings_analysis, summary)
-        _write_top_opportunities(wb, savings_analysis, summary)
+    # RI / SP Savings sheets — separate sheets for each option
+    if savings_analysis:
+        ri = savings_analysis.get("ri_analysis")
+        sp = savings_analysis.get("sp_analysis")
+        has_ri_data = ri and (ri.get("savings_by_category") or ri.get("top_opportunities"))
+        has_sp_data = sp and (sp.get("savings_by_category") or sp.get("top_opportunities"))
+
+        if has_ri_data:
+            _write_savings_variant(wb, ri, summary, "RI — Reserved Instances", "RI")
+        if has_sp_data:
+            _write_savings_variant(wb, sp, summary, "SP — Savings Plans", "SP")
+
+        # Hybrid strategy sheet (SP for compute + RI for the rest)
+        hybrid = savings_analysis.get("hybrid_analysis")
+        has_hybrid = hybrid and (hybrid.get("savings_by_category") or hybrid.get("top_opportunities"))
+        if has_hybrid:
+            _write_savings_variant(wb, hybrid, summary, "Hybrid — SP + RI", "Hybrid")
+
+        # Strategy comparison on Exec Summary — appended after KPI cards
+        if has_ri_data and has_sp_data and has_hybrid:
+            _write_strategy_comparison(wb, ri, sp, hybrid, summary)
+
+        # Backward-compat: if old-style combined data is present, still works
+        if not has_ri_data and not has_sp_data and (
+            savings_analysis.get("savings_by_category")
+            or savings_analysis.get("top_opportunities")
+        ):
+            _write_savings_variant(wb, savings_analysis, summary, "Savings Analysis", "RI/SP")
 
     _write_cost_breakdown(wb, pivots)
     _write_daily_trend(wb, pivots)
@@ -174,7 +194,132 @@ def _write_executive_summary(
         df2 = pivots["cost_by_subscription"].to_pandas().head(10)
         _write_branded_table(ws, df2, start_row=tbl_row2, start_col=1, currency_cols=["TotalCost"])
 
+    # ── Disclaimer ─────────────────────────────────────────────────────────────
+    disc_row = tbl_row2 + 14
+    ws.merge_cells(start_row=disc_row, start_column=1, end_row=disc_row, end_column=8)
+    disc_cell = ws.cell(row=disc_row, column=1)
+    disc_cell.value = (
+        "DISCLAIMER: All analysis, savings estimates, and recommendations in this "
+        "report are for estimation and demonstrative purposes only. Figures are "
+        "approximations based on publicly available Azure retail pricing data and "
+        "standard discount assumptions. No guarantees are provided regarding "
+        "accuracy, completeness, or realisation of projected savings. This report "
+        "does not constitute financial advice. Always validate with your Microsoft "
+        "account team before making commitment decisions."
+    )
+    disc_cell.font = Font(name="Calibri", italic=True, size=8, color="999999")
+    disc_cell.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[disc_row].height = 48
+
     # Print setup
+    ws.sheet_view.showGridLines = False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Strategy Comparison (appended to a new sheet)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _write_strategy_comparison(
+    wb: Workbook,
+    ri: dict[str, Any],
+    sp: dict[str, Any],
+    hybrid: dict[str, Any],
+    summary: dict[str, Any],
+) -> None:
+    """Write a compact strategy comparison sheet: Pure RI vs Pure SP vs Hybrid."""
+    ws = wb.create_sheet("Strategy Comparison")
+    ws.sheet_properties.tabColor = _GREEN
+
+    ccy = summary.get("currency", "USD")
+    ri_kpi = ri.get("kpi", {})
+    sp_kpi = sp.get("kpi", {})
+    h_kpi = hybrid.get("kpi", {})
+
+    ws.merge_cells("A1:D1")
+    ws["A1"].value = "Commitment Strategy Comparison"
+    ws["A1"].font = _TITLE_FONT
+    ws["A1"].alignment = Alignment(vertical="center")
+    ws.row_dimensions[1].height = 36
+
+    ws.merge_cells("A2:D2")
+    ws["A2"].value = (
+        f"Generated {datetime.now():%B %d, %Y}  |  "
+        f"Current 3-Yr PAYG Spend: {ccy} {ri_kpi.get('current_3yr_spend', 0):,.2f}"
+    )
+    ws["A2"].font = Font(name="Calibri", italic=True, size=10, color="666666")
+
+    # Header row
+    row = 4
+    headers = ["Metric", "Option A — Pure RI", "Option B — Pure SP", "Hybrid (SP + RI)"]
+    for col, h in enumerate(headers, 1):
+        c = ws.cell(row=row, column=col, value=h)
+        c.font = _HEADER_FONT
+        c.fill = _HEADER_FILL
+        c.alignment = Alignment(horizontal="center")
+        ws.column_dimensions[get_column_letter(col)].width = 28
+
+    # Data rows
+    metrics = [
+        ("3-Year Savings", ri_kpi.get("total_3yr_savings", 0), sp_kpi.get("total_3yr_savings", 0), h_kpi.get("total_3yr_savings", 0)),
+        ("Annual Savings", ri_kpi.get("annual_savings", 0), sp_kpi.get("annual_savings", 0), h_kpi.get("annual_savings", 0)),
+        ("Commitment 3-Yr Cost", ri_kpi.get("commitment_3yr_cost", 0), sp_kpi.get("commitment_3yr_cost", 0), h_kpi.get("commitment_3yr_cost", 0)),
+        ("Savings %", ri_kpi.get("savings_pct", 0), sp_kpi.get("savings_pct", 0), h_kpi.get("savings_pct", 0)),
+        ("Avg Discount Rate", ri_kpi.get("discount_rate", 0) * 100, sp_kpi.get("discount_rate", 0) * 100, h_kpi.get("discount_rate", 0) * 100),
+        ("SP-Eligible Recs", "—", "—", h_kpi.get("sp_eligible_recs", 0)),
+        ("RI-Only Recs", "—", "—", h_kpi.get("ri_only_recs", 0)),
+        ("Total Recommendations", ri_kpi.get("total_recommendations", 0), sp_kpi.get("total_recommendations", 0), h_kpi.get("total_recommendations", 0)),
+    ]
+
+    for i, (label, v_ri, v_sp, v_h) in enumerate(metrics):
+        r = row + 1 + i
+        ws.cell(row=r, column=1, value=label).font = Font(name="Calibri", bold=True, size=10)
+        is_currency = i < 3  # first 3 rows are currency values
+        is_pct = i in (3, 4)
+        for col, val in [(2, v_ri), (3, v_sp), (4, v_h)]:
+            cell = ws.cell(row=r, column=col, value=val)
+            cell.font = _BODY_FONT
+            cell.alignment = Alignment(horizontal="center")
+            if is_currency and isinstance(val, (int, float)):
+                cell.number_format = _CURRENCY_FMT
+            elif is_pct and isinstance(val, (int, float)):
+                cell.number_format = '0.1'
+            cell.border = _THIN_BORDER
+        # Stripe alternate rows
+        if i % 2 == 0:
+            for col in range(1, 5):
+                ws.cell(row=r, column=col).fill = PatternFill(
+                    start_color=_LIGHT_GREY, end_color=_LIGHT_GREY, fill_type="solid"
+                )
+
+    # Highlight the best savings column
+    best_sav = max(
+        ri_kpi.get("total_3yr_savings", 0),
+        sp_kpi.get("total_3yr_savings", 0),
+        h_kpi.get("total_3yr_savings", 0),
+    )
+    best_col = (
+        2 if ri_kpi.get("total_3yr_savings", 0) == best_sav
+        else 3 if sp_kpi.get("total_3yr_savings", 0) == best_sav
+        else 4
+    )
+    for r in range(row + 1, row + 1 + len(metrics)):
+        ws.cell(row=r, column=best_col).font = Font(
+            name="Calibri", bold=True, size=10, color=_GREEN
+        )
+
+    # ── Disclaimer ─────────────────────────────────────────────────────────────
+    disc_row = row + 1 + len(metrics) + 2
+    ws.merge_cells(start_row=disc_row, start_column=1, end_row=disc_row, end_column=4)
+    disc_cell = ws.cell(row=disc_row, column=1)
+    disc_cell.value = (
+        "DISCLAIMER: All figures are estimates for demonstrative purposes only. "
+        "No guarantees are provided. Validate with your Microsoft account team "
+        "before making commitment decisions."
+    )
+    disc_cell.font = Font(name="Calibri", italic=True, size=8, color="999999")
+    disc_cell.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[disc_row].height = 32
+
     ws.sheet_view.showGridLines = False
 
 
@@ -308,42 +453,51 @@ def _write_cost_query(wb: Workbook, cost_query_rows: list[dict[str, Any]]) -> No
 # RI / SP Savings Analysis  (matches reference RI_RECOMMENDATIONS_Executive.xlsx)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _write_ri_sp_savings(
+def _write_savings_variant(
     wb: Workbook,
-    savings: dict[str, Any],
+    variant: dict[str, Any],
     summary: dict[str, Any],
+    sheet_title: str,
+    label: str,
 ) -> None:
-    ws = wb.create_sheet("RI SP Savings Analysis")
+    """Write a self-contained savings analysis sheet for one variant (RI or SP).
+
+    Includes KPIs, savings by category table, savings by region table,
+    and top opportunities — all on one sheet.
+    """
+    ws = wb.create_sheet(sheet_title)
     ws.sheet_properties.tabColor = _BRAND_DARK
 
-    kpi = savings.get("kpi", {})
+    kpi = variant.get("kpi", {})
     ccy = summary.get("currency", "USD")
 
     # ── Title block ────────────────────────────────────────────────────────────
     ws.merge_cells("A1:H1")
     c = ws["A1"]
-    c.value = "Reserved Instance / Savings Plan — Recommendations"
+    c.value = f"{label} — Savings Analysis"
     c.font = _TITLE_FONT
     c.alignment = Alignment(vertical="center")
     ws.row_dimensions[1].height = 36
 
+    period_days = variant.get("period_days") or summary.get("period_days", 0)
     ws.merge_cells("A2:H2")
     ws["A2"].value = (
         f"Generated {datetime.now():%B %d, %Y}  |  "
         f"Period: {summary.get('period_start', 'N/A')} to {summary.get('period_end', 'N/A')}  |  "
-        f"Based on {savings.get('period_days', 0)}-day run rate extrapolated to 3 years"
+        f"Based on {period_days}-day run rate extrapolated to 3 years"
     )
     ws["A2"].font = Font(name="Calibri", italic=True, size=10, color="666666")
 
-    # ── KPI row 1  (headline metrics) ──────────────────────────────────────────
+    # ── KPI row ────────────────────────────────────────────────────────────────
     row = 4
     headline_kpis = [
         ("Total 3-Year Savings", f"{ccy} {kpi.get('total_3yr_savings', 0):,.2f}"),
         ("Savings %", f"{kpi.get('savings_pct', 0):.1f}%"),
         ("Total Recommendations", f"{kpi.get('total_recommendations', 0):,}"),
+        ("Commitment 3-Yr Cost", f"{ccy} {kpi.get('commitment_3yr_cost', 0):,.2f}"),
     ]
-    for col_idx, (label, value) in enumerate(headline_kpis, start=1):
-        cell_l = ws.cell(row=row, column=col_idx, value=label)
+    for col_idx, (lbl, value) in enumerate(headline_kpis, start=1):
+        cell_l = ws.cell(row=row, column=col_idx, value=lbl)
         cell_l.font = _KPI_LABEL_FONT
         cell_l.alignment = Alignment(horizontal="center")
         cell_v = ws.cell(row=row + 1, column=col_idx, value=value)
@@ -355,15 +509,15 @@ def _write_ri_sp_savings(
             )
         ws.column_dimensions[get_column_letter(col_idx)].width = 26
 
-    # ── KPI row 2  (context metrics) ──────────────────────────────────────────
     row2 = row + 3
     context_kpis = [
         ("Current 3-Yr Spend (PAYG)", f"{ccy} {kpi.get('current_3yr_spend', 0):,.2f}"),
-        ("RI/SP 3-Yr Cost", f"{ccy} {kpi.get('ri_sp_3yr_cost', 0):,.2f}"),
+        (f"Discount Rate", f"{kpi.get('discount_rate', 0) * 100:.0f}%"),
         ("Resource Categories", f"{kpi.get('resource_categories', 0)}"),
+        ("Retail Prices Used", f"{kpi.get('retail_prices_used', 0)}"),
     ]
-    for col_idx, (label, value) in enumerate(context_kpis, start=1):
-        cell_l = ws.cell(row=row2, column=col_idx, value=label)
+    for col_idx, (lbl, value) in enumerate(context_kpis, start=1):
+        cell_l = ws.cell(row=row2, column=col_idx, value=lbl)
         cell_l.font = _KPI_LABEL_FONT
         cell_l.alignment = Alignment(horizontal="center")
         cell_v = ws.cell(row=row2 + 1, column=col_idx, value=value)
@@ -374,103 +528,89 @@ def _write_ri_sp_savings(
                 start_color=_LIGHT_GREY, end_color=_LIGHT_GREY, fill_type="solid"
             )
 
-    # ── Savings breakdown by Resource Type ─────────────────────────────────────
+    # ── Savings by Resource Type ───────────────────────────────────────────────
     tbl_row = row2 + 3
-    ws.cell(row=tbl_row, column=1, value="Savings Breakdown by Resource Type").font = _SECTION_FONT
+    ws.cell(row=tbl_row, column=1, value="Savings by Resource Type").font = _SECTION_FONT
     tbl_row += 1
 
-    cats = savings.get("savings_by_category", [])
+    cats = variant.get("savings_by_category", [])
     if cats:
         df = pd.DataFrame(cats)
         end = _write_branded_table(
             ws, df, start_row=tbl_row, start_col=1,
-            currency_cols=["Current 3-Yr Cost", "RI/SP 3-Yr Cost", "Net Savings (3-Yr)", "Annual Savings", "Monthly Savings"],
+            currency_cols=["Current 3-Yr Cost", "Commitment 3-Yr Cost", "Savings (3-Yr)",
+                           "Annual Savings", "Monthly Savings"],
         )
-        # Add bar chart for net savings
         _add_bar_chart(
-            ws, tbl_row, len(df), label_col=1, value_col=4,
-            anchor=f"J{tbl_row}", title="Net 3-Year Savings by Resource Type",
+            ws, tbl_row, len(df), label_col=1, value_col=3,
+            anchor=f"K{tbl_row}", title=f"{label} 3-Year Savings by Resource Type",
         )
+        tbl_row = end + 2
+    else:
+        ws.cell(row=tbl_row, column=1, value="No category data.").font = Font(
+            name="Calibri", italic=True, size=10, color="888888")
+        tbl_row += 2
 
-    ws.sheet_view.showGridLines = False
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Savings by Region
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _write_savings_by_region(
-    wb: Workbook,
-    savings: dict[str, Any],
-    summary: dict[str, Any],
-) -> None:
-    ws = wb.create_sheet("By Region")
-    ws.sheet_properties.tabColor = _BRAND_MED
-
-    ws.cell(row=1, column=1, value="RI / SP Savings — By Region").font = _SECTION_FONT
-    regions = savings.get("savings_by_region", [])
-    if not regions:
-        ws.cell(row=3, column=1, value="No region-level data available.").font = Font(
-            name="Calibri", italic=True, size=10, color="888888"
+    # ── Savings by Region ──────────────────────────────────────────────────────
+    ws.cell(row=tbl_row, column=1, value="Savings by Region").font = _SECTION_FONT
+    tbl_row += 1
+    regions = variant.get("savings_by_region", [])
+    if regions:
+        df_rgn = pd.DataFrame(regions)
+        end = _write_branded_table(
+            ws, df_rgn, start_row=tbl_row, start_col=1,
+            currency_cols=["Current 3-Yr Cost", "Commitment 3-Yr Cost", "Savings (3-Yr)",
+                           "Annual Savings"],
         )
-        ws.sheet_view.showGridLines = False
-        return
+        tbl_row = end + 2
+    else:
+        ws.cell(row=tbl_row, column=1, value="No region data.").font = Font(
+            name="Calibri", italic=True, size=10, color="888888")
+        tbl_row += 2
 
-    df = pd.DataFrame(regions)
-    end = _write_branded_table(
-        ws, df, start_row=2, start_col=1,
-        currency_cols=["Current 3-Yr Cost", "RI/SP 3-Yr Cost", "Net Savings (3-Yr)", "Annual Savings"],
-    )
-    _add_bar_chart(
-        ws, header_row=2, data_count=len(df), label_col=1, value_col=4,
-        anchor=f"I2", title="Net 3-Year Savings by Region",
-    )
-    ws.sheet_view.showGridLines = False
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Top Opportunities
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _write_top_opportunities(
-    wb: Workbook,
-    savings: dict[str, Any],
-    summary: dict[str, Any],
-) -> None:
-    ws = wb.create_sheet("Top Opportunities")
-    ws.sheet_properties.tabColor = _BRAND_MED
-
-    ws.cell(row=1, column=1, value="RI / SP — Top Opportunities Ranked by Savings").font = _SECTION_FONT
-    opps = savings.get("top_opportunities", [])
-    if not opps:
-        ws.cell(row=3, column=1, value="No recommendation data available.").font = Font(
-            name="Calibri", italic=True, size=10, color="888888"
+    # ── Top Opportunities ──────────────────────────────────────────────────────
+    ws.cell(row=tbl_row, column=1, value="Top Opportunities — Ranked by Savings").font = _SECTION_FONT
+    tbl_row += 1
+    opps = variant.get("top_opportunities", [])
+    if opps:
+        df_opp = pd.DataFrame(opps)
+        display_cols = [c for c in df_opp.columns if c != "Description"]
+        display_df = df_opp[display_cols]
+        end = _write_branded_table(
+            ws, display_df, start_row=tbl_row, start_col=1,
+            currency_cols=["Current 3-Yr Cost", "Commitment 3-Yr Cost", "Savings (3-Yr)",
+                           "Annual Savings"],
         )
-        ws.sheet_view.showGridLines = False
-        return
+        # Color-code savings %
+        if "Savings %" in display_df.columns:
+            sav_col_idx = list(display_df.columns).index("Savings %") + 1
+            for row_idx in range(tbl_row + 1, tbl_row + 1 + len(display_df)):
+                cell = ws.cell(row=row_idx, column=sav_col_idx)
+                try:
+                    val = float(cell.value) if cell.value is not None else 0
+                except (TypeError, ValueError):
+                    val = 0
+                if val >= 40:
+                    cell.font = Font(name="Calibri", bold=True, size=10, color=_GREEN)
+                elif val >= 20:
+                    cell.font = Font(name="Calibri", bold=True, size=10, color=_ORANGE)
 
-    df = pd.DataFrame(opps)
-    # Drop Description column from display if too wide
-    display_cols = [c for c in df.columns if c != "Description"]
-    display_df = df[display_cols]
-    end = _write_branded_table(
-        ws, display_df, start_row=2, start_col=1,
-        currency_cols=["Current 3-Yr Cost", "RI/SP 3-Yr Cost", "Net Savings (3-Yr)", "Annual Savings"],
+        tbl_row = end + 2
+    else:
+        tbl_row += 1
+
+    # ── Disclaimer ─────────────────────────────────────────────────────────────
+    ws.merge_cells(start_row=tbl_row, start_column=1, end_row=tbl_row, end_column=8)
+    disc_cell = ws.cell(row=tbl_row, column=1)
+    disc_cell.value = (
+        "DISCLAIMER: All figures are estimates for demonstrative purposes only. "
+        "No guarantees are provided regarding accuracy, completeness, or "
+        "realisation of projected savings. Validate with your Microsoft "
+        "account team before making commitment decisions."
     )
-
-    # Color-code savings % column
-    if "Savings %" in display_df.columns:
-        sav_col_idx = list(display_df.columns).index("Savings %") + 1
-        for row_idx in range(3, 3 + len(display_df)):
-            cell = ws.cell(row=row_idx, column=sav_col_idx)
-            try:
-                val = float(cell.value) if cell.value is not None else 0
-            except (TypeError, ValueError):
-                val = 0
-            if val >= 40:
-                cell.font = Font(name="Calibri", bold=True, size=10, color=_GREEN)
-            elif val >= 20:
-                cell.font = Font(name="Calibri", bold=True, size=10, color=_ORANGE)
+    disc_cell.font = Font(name="Calibri", italic=True, size=8, color="999999")
+    disc_cell.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[tbl_row].height = 32
 
     ws.sheet_view.showGridLines = False
 
@@ -489,31 +629,38 @@ def _write_pivot_data(wb: Workbook, savings: dict[str, Any]) -> None:
         "Insert an Excel PivotTable on this range to slice by Resource Type, Region, SKU, etc."
     )).font = Font(name="Calibri", italic=True, size=9, color="666666")
 
-    opps = savings.get("top_opportunities", [])
-    cats = savings.get("savings_by_category", [])
-    regions = savings.get("savings_by_region", [])
-    kpi = savings.get("kpi", {})
+    # Use RI analysis as the primary data source (SP is on its own sheet)
+    ri = savings.get("ri_analysis", {})
+    sp = savings.get("sp_analysis", {})
+    opps_ri = ri.get("top_opportunities", savings.get("top_opportunities", []))
+    opps_sp = sp.get("top_opportunities", [])
+    cats = ri.get("savings_by_category", savings.get("savings_by_category", []))
+    regions = ri.get("savings_by_region", savings.get("savings_by_region", []))
+    kpi = ri.get("kpi", savings.get("kpi", {}))
 
     # ── Opportunity detail table (main pivot source) ───────────────────────────
-    if opps:
-        # Build a rich flat table with extra computed columns
+    tbl_end = 4
+    if opps_ri:
+        # Build a rich flat table merging RI + SP data per recommendation
         rows: list[dict[str, Any]] = []
-        for opp in opps:
+        for idx, opp in enumerate(opps_ri):
+            sp_opp = opps_sp[idx] if idx < len(opps_sp) else {}
             rows.append({
                 "Rank": opp.get("Rank"),
                 "Resource Type": opp.get("Resource Type", ""),
                 "SKU": opp.get("SKU", ""),
                 "Region": opp.get("Region", ""),
                 "Current 3-Yr Cost": opp.get("Current 3-Yr Cost", 0),
-                "RI/SP 3-Yr Cost": opp.get("RI/SP 3-Yr Cost", 0),
-                "Net Savings (3-Yr)": opp.get("Net Savings (3-Yr)", 0),
-                "Savings %": opp.get("Savings %", 0),
-                "Annual Savings": opp.get("Annual Savings", 0),
-                "Monthly Savings": round(opp.get("Annual Savings", 0) / 12, 2),
-                "% of Total Savings": (
-                    round(opp.get("Net Savings (3-Yr)", 0) / kpi.get("total_3yr_savings", 1) * 100, 1)
-                    if kpi.get("total_3yr_savings", 0) > 0 else 0
-                ),
+                "RI 3-Yr Cost": opp.get("Commitment 3-Yr Cost", 0),
+                "RI Savings (3-Yr)": opp.get("Savings (3-Yr)", 0),
+                "SP 3-Yr Cost": sp_opp.get("Commitment 3-Yr Cost", 0),
+                "SP Savings (3-Yr)": sp_opp.get("Savings (3-Yr)", 0),
+                "RI Savings %": opp.get("Savings %", 0),
+                "SP Savings %": sp_opp.get("Savings %", 0),
+                "Annual Savings (RI)": opp.get("Annual Savings", 0),
+                "Annual Savings (SP)": sp_opp.get("Annual Savings", 0),
+                "Monthly Savings (RI)": round(opp.get("Annual Savings", 0) / 12, 2),
+                "Pricing Source": opp.get("Pricing Source", "Estimated"),
                 "Description": opp.get("Description", ""),
             })
         df_opp = pd.DataFrame(rows)
@@ -521,8 +668,9 @@ def _write_pivot_data(wb: Workbook, savings: dict[str, Any]) -> None:
         ws.cell(row=tbl_start - 1, column=1, value="Recommendation Detail").font = _SECTION_FONT
         tbl_end = _write_branded_table(
             ws, df_opp, start_row=tbl_start, start_col=1,
-            currency_cols=["Current 3-Yr Cost", "RI/SP 3-Yr Cost", "Net Savings (3-Yr)",
-                           "Annual Savings", "Monthly Savings"],
+            currency_cols=["Current 3-Yr Cost", "RI 3-Yr Cost", "RI Savings (3-Yr)",
+                           "SP 3-Yr Cost", "SP Savings (3-Yr)",
+                           "Annual Savings (RI)", "Annual Savings (SP)", "Monthly Savings (RI)"],
         )
 
         # Add an Excel Table object so user can one-click "Insert PivotTable"
@@ -537,12 +685,12 @@ def _write_pivot_data(wb: Workbook, savings: dict[str, Any]) -> None:
 
     # ── Category summary beneath ───────────────────────────────────────────────
     if cats:
-        gap = (tbl_end + 2) if opps else 4
+        gap = (tbl_end + 2) if opps_ri else 4
         ws.cell(row=gap, column=1, value="Summary by Resource Type").font = _SECTION_FONT
         df_cat = pd.DataFrame(cats)
         _write_branded_table(
             ws, df_cat, start_row=gap + 1, start_col=1,
-            currency_cols=["Current 3-Yr Cost", "RI/SP 3-Yr Cost", "Net Savings (3-Yr)",
+            currency_cols=["Current 3-Yr Cost", "Commitment 3-Yr Cost", "Savings (3-Yr)",
                            "Annual Savings", "Monthly Savings"],
         )
 
@@ -554,7 +702,7 @@ def _write_pivot_data(wb: Workbook, savings: dict[str, Any]) -> None:
         df_rgn = pd.DataFrame(regions)
         _write_branded_table(
             ws, df_rgn, start_row=last_used + 1, start_col=1,
-            currency_cols=["Current 3-Yr Cost", "RI/SP 3-Yr Cost", "Net Savings (3-Yr)",
+            currency_cols=["Current 3-Yr Cost", "Commitment 3-Yr Cost", "Savings (3-Yr)",
                            "Annual Savings"],
         )
 

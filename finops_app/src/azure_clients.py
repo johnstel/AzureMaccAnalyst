@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import random
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +19,145 @@ logger = get_logger(__name__)
 _ARM_SCOPE = "https://management.azure.com/.default"
 _ARM_BASE = "https://management.azure.com"
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rate Limiter  —  prevents thundering-herd 429 errors
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _RateLimiter:
+    """Adaptive rate limiter that dynamically adjusts concurrency on throttling.
+
+    Starts with an initial concurrency level and minimum inter-request interval.
+    When Azure returns 429 (throttled), concurrency is halved and the interval
+    increases.  After a streak of consecutive successes the limiter gradually
+    restores concurrency and reduces the interval back toward their initial
+    values.
+
+    This prevents the "thundering herd" problem where all threads keep
+    hammering the API after a 429, making the situation worse.
+    """
+
+    def __init__(
+        self,
+        max_concurrent: int = 3,
+        min_interval: float = 0.5,
+        *,
+        recovery_streak: int = 10,
+    ):
+        self._initial_concurrent = max_concurrent
+        self._initial_interval = min_interval
+        self._max_concurrent = max_concurrent
+        self._min_interval = min_interval
+        self._recovery_streak = recovery_streak
+
+        self._semaphore = threading.BoundedSemaphore(max_concurrent)
+        self._lock = threading.Lock()
+        self._last_time = 0.0
+        self._consecutive_ok = 0
+        self._active = 0  # currently active slots
+        self._throttle_count = 0  # lifetime throttle events
+
+    def acquire(self) -> None:
+        self._semaphore.acquire()
+        with self._lock:
+            self._active += 1
+            now = time.monotonic()
+            wait = self._last_time + self._min_interval - now
+            if wait > 0:
+                time.sleep(wait)
+            self._last_time = time.monotonic()
+
+    def release(self) -> None:
+        with self._lock:
+            self._active = max(self._active - 1, 0)
+        self._semaphore.release()
+
+    # ── Feedback signals ──────────────────────────────────────────────────
+    def report_success(self) -> None:
+        """Call after a successful API response (non-429)."""
+        with self._lock:
+            self._consecutive_ok += 1
+            if (
+                self._consecutive_ok >= self._recovery_streak
+                and self._max_concurrent < self._initial_concurrent
+            ):
+                old_c = self._max_concurrent
+                self._max_concurrent = min(self._max_concurrent + 1, self._initial_concurrent)
+                self._min_interval = max(
+                    self._min_interval * 0.85,
+                    self._initial_interval,
+                )
+                self._consecutive_ok = 0  # reset streak counter
+                # Add a permit back to the semaphore
+                try:
+                    self._semaphore.release()
+                except ValueError:
+                    pass  # semaphore at max — harmless
+                logger.info(
+                    "Adaptive throttle: recovering concurrency %d → %d "
+                    "(interval %.2fs) after %d consecutive successes",
+                    old_c, self._max_concurrent,
+                    self._min_interval, self._recovery_streak,
+                )
+
+    def report_throttle(self) -> None:
+        """Call when a 429 response is received."""
+        with self._lock:
+            self._throttle_count += 1
+            self._consecutive_ok = 0
+            old_c = self._max_concurrent
+            old_i = self._min_interval
+
+            # Halve concurrency (floor 1)
+            new_concurrent = max(self._max_concurrent // 2, 1)
+            # Increase interval by 50%
+            new_interval = self._min_interval * 1.5
+
+            # Drain excess permits from the semaphore
+            drained = 0
+            for _ in range(old_c - new_concurrent):
+                acquired = self._semaphore.acquire(blocking=False)
+                if acquired:
+                    drained += 1
+                else:
+                    break  # no more available permits
+
+            self._max_concurrent = new_concurrent
+            self._min_interval = new_interval
+
+            logger.warning(
+                "Adaptive throttle: reducing concurrency %d → %d, "
+                "interval %.2fs → %.2fs (throttle event #%d, drained %d permits)",
+                old_c, new_concurrent,
+                old_i, new_interval,
+                self._throttle_count, drained,
+            )
+
+    @property
+    def current_concurrency(self) -> int:
+        return self._max_concurrent
+
+    @property
+    def current_interval(self) -> float:
+        return self._min_interval
+
+    @property
+    def throttle_count(self) -> int:
+        return self._throttle_count
+
+
+# Shared rate limiter for Cost Management queries (most throttle-sensitive)
+_cost_mgmt_limiter = _RateLimiter(
+    max_concurrent=int(os.getenv("AZURE_COST_MAX_CONCURRENT", "3")),
+    min_interval=float(os.getenv("AZURE_COST_MIN_INTERVAL", "0.6")),
+)
+
+# Shared rate limiter for Advisor API (less aggressive but still throttled)
+_advisor_limiter = _RateLimiter(
+    max_concurrent=int(os.getenv("AZURE_ADVISOR_MAX_CONCURRENT", "5")),
+    min_interval=float(os.getenv("AZURE_ADVISOR_MIN_INTERVAL", "0.3")),
+)
 
 
 def is_throttling_exception(ex: Exception) -> bool:
@@ -47,9 +189,9 @@ def _api_version(name: str, default: str) -> str:
 
 def _max_retries() -> int:
     try:
-        return max(0, int(os.getenv("AZURE_HTTP_MAX_RETRIES", "3")))
+        return max(0, int(os.getenv("AZURE_HTTP_MAX_RETRIES", "7")))
     except ValueError:
-        return 3
+        return 7
 
 
 def _retry_base_seconds() -> float:
@@ -57,6 +199,35 @@ def _retry_base_seconds() -> float:
         return max(0.1, float(os.getenv("AZURE_HTTP_RETRY_BASE_SECONDS", "1.5")))
     except ValueError:
         return 1.5
+
+
+def _default_max_workers(num_subscriptions: int) -> int:
+    """Calculate optimal worker pool size based on subscription count.
+    
+    Rules:
+    - Up to 10 subs: 4 workers (default)
+    - 11-50 subs: 8 workers
+    - 51-150 subs: 12 workers
+    - 150+ subs: min(16, num_subscriptions // 15)
+    
+    Can be overridden with AZURE_PARALLEL_WORKERS env var.
+    """
+    env_override = os.getenv("AZURE_PARALLEL_WORKERS")
+    if env_override:
+        try:
+            return max(1, int(env_override))
+        except ValueError:
+            pass
+    
+    if num_subscriptions <= 10:
+        return 4
+    elif num_subscriptions <= 50:
+        return 8
+    elif num_subscriptions <= 150:
+        return 12
+    else:
+        return min(16, max(12, num_subscriptions // 15))
+
 
 
 def _auth_header(credential: TokenCredential) -> dict[str, str]:
@@ -73,11 +244,15 @@ def _request_with_retries(
     params: dict[str, Any] | None = None,
     json_body: dict[str, Any] | None = None,
     timeout: int = 60,
+    rate_limiter: _RateLimiter | None = None,
 ) -> requests.Response:
     attempts = _max_retries() + 1
     base_delay = _retry_base_seconds()
 
     for attempt in range(1, attempts + 1):
+        # Honour rate limiter if provided (acquire before each attempt)
+        if rate_limiter:
+            rate_limiter.acquire()
         try:
             response = requests.request(
                 method,
@@ -88,10 +263,18 @@ def _request_with_retries(
                 timeout=timeout,
             )
             response.raise_for_status()
+            # Notify limiter of successful request
+            if rate_limiter:
+                rate_limiter.report_success()
             return response
         except requests.HTTPError as ex:
             status = ex.response.status_code if ex.response is not None else None
             is_retryable = status in _RETRYABLE_STATUS_CODES
+
+            # Notify limiter of throttling so it can reduce concurrency
+            if status == 429 and rate_limiter:
+                rate_limiter.report_throttle()
+
             if not is_retryable or attempt >= attempts:
                 if status == 429:
                     logger.warning(
@@ -108,7 +291,13 @@ def _request_with_retries(
                     retry_after = float(retry_after_header)
                 except ValueError:
                     retry_after = None
-            delay = retry_after if retry_after is not None and retry_after > 0 else base_delay * (2 ** (attempt - 1))
+            if retry_after is not None and retry_after > 0:
+                delay = retry_after
+            else:
+                delay = base_delay * (2 ** (attempt - 1))
+            # Add jitter (0-50% of delay) to spread retries across threads
+            jitter = delay * random.uniform(0, 0.5)
+            delay += jitter
             reason = "throttled by Azure" if status == 429 else f"HTTP {status}"
             logger.warning(
                 "%s %s failed (%s, attempt %d/%d). Retrying in %.1fs",
@@ -124,6 +313,8 @@ def _request_with_retries(
             if attempt >= attempts:
                 raise
             delay = base_delay * (2 ** (attempt - 1))
+            jitter = delay * random.uniform(0, 0.5)
+            delay += jitter
             logger.warning(
                 "%s %s failed with %s (attempt %d/%d). Retrying in %.1fs",
                 method,
@@ -134,6 +325,9 @@ def _request_with_retries(
                 delay,
             )
             time.sleep(delay)
+        finally:
+            if rate_limiter:
+                rate_limiter.release()
 
 
 def _get(credential: TokenCredential, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -151,8 +345,16 @@ def _get_all_pages(
     params: dict[str, Any] | None = None,
     *,
     allow_partial_on_error: bool = False,
+    exit_on_empty_first_page: bool = False,
+    rate_limiter: _RateLimiter | None = None,
 ) -> list[dict[str, Any]]:
-    """Follow nextLink pagination and collect all items from 'value' arrays."""
+    """Follow nextLink pagination and collect all items from 'value' arrays.
+    
+    Args:
+        exit_on_empty_first_page: If True, stop pagination if first page returns 0 items.
+                                  Useful for Advisor queries where empty first page means no results.
+        rate_limiter: Optional adaptive rate limiter for throttle-sensitive APIs.
+    """
     all_items: list[dict[str, Any]] = []
     next_url: str | None = url
     next_params = params
@@ -162,7 +364,10 @@ def _get_all_pages(
         page += 1
         logger.debug("GET page %d: %s params=%s", page, next_url, next_params)
         try:
-            response = _request_with_retries("GET", credential, next_url, params=next_params, timeout=60)
+            response = _request_with_retries(
+                "GET", credential, next_url, params=next_params, timeout=60,
+                rate_limiter=rate_limiter,
+            )
         except requests.RequestException as ex:
             if allow_partial_on_error and all_items:
                 logger.warning(
@@ -181,6 +386,11 @@ def _get_all_pages(
         logger.debug("Page %d returned %d items (running total: %d)", page, len(items), len(all_items))
         next_url = payload.get("nextLink")
         next_params = None  # nextLink contains query string already
+        
+        # Early exit optimization: if first page is empty and we're not expecting pagination, stop
+        if exit_on_empty_first_page and page == 1 and len(items) == 0:
+            logger.debug("First page returned 0 items; stopping pagination early")
+            break
     elapsed = time.perf_counter() - t0
     logger.info("Paginated GET %s completed: %d pages, %d items, %.2fs", url, page, len(all_items), elapsed)
     return all_items
@@ -280,6 +490,8 @@ def list_advisor_cost_recommendations(
         url,
         params={"api-version": api_version},
         allow_partial_on_error=True,
+        exit_on_empty_first_page=True,  # Optimization: stop pagination if first page is empty
+        rate_limiter=_advisor_limiter,
     )
     logger.debug("Raw Advisor results: %d (all categories)", len(all_recs))
 
@@ -306,6 +518,56 @@ def list_advisor_cost_recommendations(
         )
     logger.info("Advisor cost recommendations for %s: %d", subscription_id, len(recs))
     return recs
+
+
+def list_advisor_cost_recommendations_parallel(
+    credential: TokenCredential,
+    subscription_ids: list[str],
+    max_workers: int | None = None,
+) -> list[AzureRecommendation]:
+    """Fetch Advisor recommendations for multiple subscriptions in parallel.
+    
+    Args:
+        credential: Azure credential
+        subscription_ids: List of subscription IDs to query
+        max_workers: Maximum number of concurrent threads. If None, auto-calculated based on
+                     subscription count. Can be overridden with AZURE_PARALLEL_WORKERS env var.
+    
+    Returns:
+        Flattened list of all recommendations from all subscriptions
+    """
+    if max_workers is None:
+        max_workers = _default_max_workers(len(subscription_ids))
+    
+    all_recs: list[AzureRecommendation] = []
+    
+    def fetch_advisor_for_subscription(sid: str) -> tuple[str, list[AzureRecommendation]]:
+        """Fetch recommendations for one subscription. Returns (subscription_id, recommendations)."""
+        try:
+            recs = list_advisor_cost_recommendations(credential, sid)
+            return (sid, recs)
+        except Exception as ex:
+            logger.warning("Failed Advisor query for subscription %s: %s", sid, ex)
+            return (sid, [])
+    
+    logger.info("Fetching Advisor recommendations for %d subscriptions (max %d parallel workers)", len(subscription_ids), max_workers)
+    t0 = time.perf_counter()
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(fetch_advisor_for_subscription, sid): sid for sid in subscription_ids}
+        
+        for future in as_completed(futures):
+            try:
+                sid, recs = future.result()
+                all_recs.extend(recs)
+                logger.debug("Advisor fetch completed for subscription %s: %d recommendations", sid, len(recs))
+            except Exception as ex:
+                sid = futures[future]
+                logger.error("Unexpected error fetching Advisor for subscription %s: %s", sid, ex)
+    
+    elapsed = time.perf_counter() - t0
+    logger.info("Parallel Advisor fetch completed: %d total recommendations in %.2fs", len(all_recs), elapsed)
+    return all_recs
 
 
 def query_cost_by_service(
@@ -336,6 +598,7 @@ def query_cost_by_service(
         params={"api-version": api_version},
         json_body=body,
         timeout=120,
+        rate_limiter=_cost_mgmt_limiter,
     )
     elapsed = time.perf_counter() - t0
     logger.debug("POST %s -> %s (%.2fs)", url, response.status_code, elapsed)
@@ -347,6 +610,70 @@ def query_cost_by_service(
     shaped = [dict(zip(columns, row)) for row in rows]
     logger.info("Cost query returned %d rows for scope %s", len(shaped), scope)
     return shaped
+
+
+def query_cost_by_service_parallel(
+    credential: TokenCredential,
+    subscription_ids: list[str],
+    start_date: str,
+    end_date: str,
+    max_workers: int | None = None,
+) -> list[dict[str, Any]]:
+    """Query cost by service for multiple subscriptions in parallel.
+    
+    Uses a lower concurrency cap than Advisor queries because the Cost
+    Management API has stricter rate limits (~30 requests/minute/tenant).
+    The rate limiter further spaces requests to avoid 429 bursts.
+    
+    Args:
+        credential: Azure credential
+        subscription_ids: List of subscription IDs to query
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        max_workers: Maximum number of concurrent threads. If None, auto-calculated
+                     with a lower ceiling than Advisor.
+    
+    Returns:
+        Flattened list of all cost query rows from all subscriptions
+    """
+    if max_workers is None:
+        # Cost Management is throttle-sensitive: use half the default workers, capped at 5
+        max_workers = min(5, _default_max_workers(len(subscription_ids)))
+    
+    all_rows: list[dict[str, Any]] = []
+    
+    def fetch_cost_for_subscription(sid: str) -> tuple[str, list[dict[str, Any]]]:
+        """Query cost for one subscription. Returns (subscription_id, rows)."""
+        try:
+            rows = query_cost_by_service(
+                credential=credential,
+                scope=f"/subscriptions/{sid}",
+                start_date=f"{start_date}T00:00:00Z",
+                end_date=f"{end_date}T23:59:59Z",
+            )
+            return (sid, rows)
+        except Exception as ex:
+            logger.warning("Cost query failed for subscription %s: %s", sid, ex)
+            return (sid, [])
+    
+    logger.info("Running Cost Management queries for %d subscriptions (max %d parallel workers)", len(subscription_ids), max_workers)
+    t0 = time.perf_counter()
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(fetch_cost_for_subscription, sid): sid for sid in subscription_ids}
+        
+        for future in as_completed(futures):
+            try:
+                sid, rows = future.result()
+                all_rows.extend(rows)
+                logger.debug("Cost query completed for subscription %s: %d rows", sid, len(rows))
+            except Exception as ex:
+                sid = futures[future]
+                logger.error("Unexpected error querying cost for subscription %s: %s", sid, ex)
+    
+    elapsed = time.perf_counter() - t0
+    logger.info("Parallel cost queries completed: %d total rows in %.2fs", len(all_rows), elapsed)
+    return all_rows
 
 
 def _extract_annual_savings(extended: dict[str, Any]) -> float:

@@ -28,9 +28,16 @@ A finance-friendly Streamlit application to:
 ## Prerequisites
 1. Python 3.11+
 2. (Optional) Azure app registration — only needed for enterprise lockdown; the default user-context flow requires no app registration.
-3. RBAC roles for signed-in users:
-   - `Cost Management Reader` (or equivalent at required scope)
-   - Reader access on resources/subscriptions for Advisor visibility
+3. RBAC roles for signed-in users (assign at Root Management Group or Billing Account scope for full coverage):
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| **Reader** | Root Management Group | Azure Advisor recommendations across all subscriptions |
+| **Cost Management Reader** | Root Management Group | Cost Management query data per subscription |
+| **Reservations Reader** | Tenant root (`/providers/Microsoft.Capacity`) | List Reserved Instance orders (API returns empty without this) |
+| **Savings Plan Reader** or **Billing Account Reader** | Billing Account | List Savings Plans (API returns 403 without this) |
+
+> **Note:** The Reservations and Savings Plans APIs are tenant/billing-scoped, not subscription-scoped. Without the correct roles, the API silently returns empty data (reservations) or an explicit 403 (savings plans).
 
 ## Setup
 1. Create and activate a virtual environment
@@ -112,6 +119,11 @@ The app checks available system RAM before attempting Tier 1:
 
 ---
 
+## Key features
+- **Retail pricing lookup** — Fetches real RI/SP pricing from the Azure Retail Prices API and normalizes term-based prices to hourly rates for accurate savings calculations
+- **CSV-based RI detection** — Identifies existing Reserved Instance and Savings Plan usage directly from invoice line items, even without Azure API access
+- **Disclaimer** — All analysis output (app UI and Excel) includes a disclaimer that savings estimates are for demonstrative purposes only
+
 ## Typical flow
 1. Sign in to Azure from the sidebar.
 2. Analyze an invoice-detail CSV or Excel file (local export).
@@ -119,15 +131,17 @@ The app checks available system RAM before attempting Tier 1:
 4. Generate and download Excel workbook.
 
 ## Output workbook sheets
-- `Summary`
-- `Optimization`
-- `cost_by_service_family`
-- `cost_by_subscription`
-- `cost_by_charge_type`
-- `cost_by_day`
-- `Commitments`
-- `Advisor`
-- `AzureCostQuery` (if available)
+- `Executive Summary` — High-level KPIs and period overview
+- `Optimization` — Cost optimization recommendations from Azure Advisor
+- `Strategy Comparison` — Side-by-side RI vs SP vs Hybrid savings strategies
+- `Savings – RI Only` / `Savings – SP Only` / `Savings – Hybrid` — Detailed savings analysis per strategy
+- `cost_by_service_family` — Spend breakdown by Azure service family
+- `cost_by_subscription` — Spend breakdown by subscription
+- `cost_by_charge_type` — Spend breakdown by charge type
+- `cost_by_day` — Daily spend trend
+- `Commitments` — Current RI and SP inventory
+- `Advisor` — Full Advisor recommendations list
+- `AzureCostQuery` — Cost Management API data (if available)
 
 ## Notes for very large exports (10 GB+)
 - The tiered conversion strategy handles files up to 8 GB by default.

@@ -13,7 +13,7 @@
 3. **Double-click** `AzureMaccAnalyst.exe`.
 4. Your browser opens to the dashboard — sign in to Azure and start analyzing.
 
-> **Requirements:** Windows 10/11, internet access, and a Microsoft account with **Cost Management Reader** on your Azure subscriptions.
+> **Requirements:** Windows 10/11, internet access, and a Microsoft account with the required Azure RBAC roles (Reader, Cost Management Reader, Reservations Reader, Savings Plan Reader). See [Desktop Distribution Guide](finops_app/README-exe.md) for details.
 
 See [Desktop Distribution Guide](finops_app/README-exe.md) for full details, troubleshooting, and enterprise deployment.
 
@@ -27,7 +27,10 @@ See [Desktop Distribution Guide](finops_app/README-exe.md) for full details, tro
 | **Large Excel Support** | Tiered conversion: fastexcel (Rust, 10–50× faster) → openpyxl streaming → Parquet/CSV intermediate with live progress bar |
 | **Azure Enrichment** | Pull current Reserved Instances, Savings Plans, and cost data via Microsoft sign-in |
 | **Advisor Recommendations** | Surface Azure Advisor cost recommendations to support future purchase decisions |
-| **Excel Reporting** | Export a consolidated Excel workbook with summary, optimization, commitments, and more |
+| **Retail Pricing** | Real RI/SP pricing from the Azure Retail Prices API with proper term-to-hourly normalisation |
+| **CSV RI Detection** | Identify existing RI and SP usage directly from invoice line items |
+| **Excel Reporting** | Export a consolidated Excel workbook with summary, optimization, commitments, and savings strategies |
+| **Disclaimer** | All estimates clearly marked as demonstrative/approximation — no guarantees |
 
 ## Analysis Scenarios
 
@@ -81,9 +84,12 @@ powershell -ExecutionPolicy Bypass -File build_exe.ps1
 ## Security Model
 
 - **Microsoft Entra** interactive browser authentication — no passwords stored in the app
-- Access controlled by **Azure RBAC** (Cost Management Reader)
+- Access controlled by **Azure RBAC**:
+  - `Reader` + `Cost Management Reader` at Root Management Group scope
+  - `Reservations Reader` at tenant/billing scope
+  - `Savings Plan Reader` or `Billing Account Reader` at billing account scope
 - Optional: set `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` for enterprise app-registration lockdown
-- See [finops_app/README.md](finops_app/README.md) for full auth details
+- See [finops_app/README.md](finops_app/README.md) for full auth and RBAC details
 
 ## License
 

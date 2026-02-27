@@ -158,6 +158,7 @@ def _normalise_columns(columns: list[str]) -> dict[str, str]:
 
 _EXCEL_EXTENSIONS = {".xlsx", ".xls", ".xlsm", ".xlsb"}
 _CSV_EXTENSIONS = {".csv", ".tsv", ".txt"}
+_PARQUET_EXTENSIONS = {".parquet", ".pq", ".pqt"}
 
 
 def _max_excel_size_mb() -> int:
@@ -217,7 +218,10 @@ def load_invoice_file(file_path: str) -> pl.LazyFrame:
     logger.info("Loading invoice file: %s (format: %s, size: %.2f MB)",
                 file_path, ext, path.stat().st_size / (1024 * 1024))
 
-    if ext in _EXCEL_EXTENSIONS:
+    if ext in _PARQUET_EXTENSIONS:
+        # Already-converted intermediate (e.g. from convert_excel_to_csv)
+        lf = pl.scan_parquet(file_path)
+    elif ext in _EXCEL_EXTENSIONS:
         size_mb = path.stat().st_size / (1024 * 1024)
         max_excel_mb = _max_excel_size_mb()
         if size_mb > max_excel_mb:
@@ -609,20 +613,28 @@ def safe_datetime_expr(col_name: str, lf: pl.LazyFrame) -> pl.Expr:
         return pl.col(col_name)
     if str(dtype).startswith("Datetime"):
         return pl.col(col_name)
-    # String column — try broad inference first, then common explicit formats.
+    # String column — try explicit formats before broad inference.
+    # Azure billing exports use US M/D/Y; try those first so ambiguous
+    # dates like "1/2/2026" parse as Jan-2 (M/D) not Feb-1 (D/M).
+    # ISO formats are unambiguous, so they go first.  Broad inference
+    # is the last resort to avoid mis-guessing D/M vs M/D.
     raw = pl.col(col_name).cast(pl.Utf8, strict=False).str.strip_chars()
     return (
-        raw.str.to_datetime(strict=False)
-        .fill_null(raw.str.to_datetime("%Y-%m-%dT%H:%M:%S", strict=False))
+        # Unambiguous ISO formats first
+        raw.str.to_datetime("%Y-%m-%dT%H:%M:%S", strict=False)
         .fill_null(raw.str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False))
         .fill_null(raw.str.to_datetime("%Y-%m-%d", strict=False))
+        # US M/D/Y (Azure billing export standard)
         .fill_null(raw.str.to_datetime("%m/%d/%Y %H:%M:%S", strict=False))
         .fill_null(raw.str.to_datetime("%m/%d/%Y %H:%M", strict=False))
         .fill_null(raw.str.to_datetime("%m/%d/%Y %I:%M:%S %p", strict=False))
         .fill_null(raw.str.to_datetime("%m/%d/%Y", strict=False))
+        .fill_null(raw.str.to_datetime("%m-%d-%Y", strict=False))
+        # European D/M/Y fallback
         .fill_null(raw.str.to_datetime("%d/%m/%Y %H:%M:%S", strict=False))
         .fill_null(raw.str.to_datetime("%d/%m/%Y %H:%M", strict=False))
         .fill_null(raw.str.to_datetime("%d/%m/%Y", strict=False))
-        .fill_null(raw.str.to_datetime("%m-%d-%Y", strict=False))
         .fill_null(raw.str.to_datetime("%d-%m-%Y", strict=False))
+        # Broad inference as last resort
+        .fill_null(raw.str.to_datetime(strict=False))
     )

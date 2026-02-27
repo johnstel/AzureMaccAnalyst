@@ -38,7 +38,17 @@
 ### Requirements
 - Windows 10/11
 - Internet access (to reach Azure APIs and Microsoft sign-in)
-- Your Microsoft account must have **Cost Management Reader** (or Reader) on the relevant Azure subscriptions
+- Your Microsoft account must have the following Azure RBAC roles:
+
+| Role | Scope | What It Enables |
+|------|-------|-----------------|
+| **Reader** | Root Management Group | Advisor recommendations across all subscriptions |
+| **Cost Management Reader** | Root Management Group | Cost data per subscription |
+| **Reservations Reader** | Tenant / Billing Account | View Reserved Instance orders |
+| **Savings Plan Reader** | Billing Account | View Savings Plan orders |
+
+> **Important:** Without these roles, the tool will still run but certain data will be missing. The Reservations API silently returns empty data (no error), and the Savings Plans API returns a 403 Forbidden. Ask your Azure administrator to assign these roles at the appropriate scope.
+
 - No Python installation needed — everything is included
 
 ### Tips

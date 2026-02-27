@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 
 try:
     from dotenv import load_dotenv
@@ -39,14 +39,18 @@ from src.azure_clients import (
     is_authorization_exception,
     is_throttling_exception,
     list_advisor_cost_recommendations,
+    list_advisor_cost_recommendations_parallel,
     list_reservations,
     list_savings_plans,
     list_subscriptions,
     query_cost_by_service,
+    query_cost_by_service_parallel,
 )
+from src.csv_ri_detection import detect_ri_opportunities
 from src.demo_data import generate_demo_data
 from src.excel_export import build_excel_workbook
 from src.file_loader import convert_excel_to_csv
+from src.retail_pricing import batch_lookup_prices
 
 
 # ── Helper: decode identity from JWT access token ─────────────────────────────
@@ -259,6 +263,17 @@ with st.sidebar:
     st.markdown("### Azure MACC Analyst")
     st.caption(f"FinOps Cost & Commitment Analysis  ·  v{APP_VERSION}")
     st.markdown("<hr style='border-color:#2E75B6; margin:8px 0;'>", unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:0.68rem; color:#A0A0A0; line-height:1.3; margin-top:4px;">'
+        '⚠️ <b>Disclaimer:</b> This tool is for estimation and '
+        'demonstrative purposes only. Savings projections are '
+        'approximations based on publicly available Azure retail '
+        'pricing and standard discount assumptions. No guarantees '
+        'are made regarding accuracy, completeness, or actual '
+        'savings. Always validate with your Microsoft account team '
+        'before making commitment decisions.</div>',
+        unsafe_allow_html=True,
+    )
 
     signed_in = "credential" in st.session_state
     if signed_in:
@@ -366,18 +381,36 @@ with col_browse:
             st.session_state["csv_path"] = picked
             st.rerun()
 with col_analyze:
-    analyze_clicked = st.button("Analyze", type="primary", use_container_width=True)
+    _manual_analyze = st.button("Analyse", use_container_width=True)
 
 if selected_file:
     st.session_state["csv_path"] = selected_file
 
-if analyze_clicked:
-    if not selected_file:
-        st.warning("Select an invoice file first.")
-    else:
+# Auto-analyze when a valid file is provided and hasn't been analyzed yet,
+# or when the user explicitly clicks the Analyse button.
+_VALID_EXTENSIONS = {".csv", ".xlsx", ".xls", ".xlsm", ".xlsb"}
+_file_is_new = (
+    selected_file
+    and Path(selected_file).suffix.lower() in _VALID_EXTENSIONS
+    and Path(selected_file).exists()
+    and (
+        st.session_state.get("_analyzed_file") != selected_file
+        or _manual_analyze
+    )
+)
+
+if _file_is_new:
         try:
             logger.info("User clicked Analyze for file: %s", selected_file)
             analysis_file = selected_file
+
+            # ── Clear stale results from previous file ─────────────────────
+            for _stale_key in (
+                "savings_analysis", "csv_recs", "recommendations",
+                "commitments", "recommendation_summary", "cost_query_rows",
+                "azure_warnings",
+            ):
+                st.session_state.pop(_stale_key, None)
 
             if Path(selected_file).suffix.lower() in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
                 # ── Excel → intermediate conversion with live progress bar ──
@@ -402,9 +435,45 @@ if analyze_clicked:
                 summary_obj, pivots = summarize_export(analysis_file)
                 st.session_state["summary"] = summary_to_dict(summary_obj)
                 st.session_state["pivots"] = pivots
+                st.session_state["_analyzed_file"] = selected_file
+                st.session_state["csv_path"] = analysis_file
                 logger.info("Invoice analysis completed successfully")
-                st.toast("Invoice analysis complete.", icon="✅")
-                st.rerun()
+
+            # ── CSV-based RI / SP opportunity detection ────────────────────────
+            with st.spinner("Detecting RI / SP opportunities from CSV…"):
+                try:
+                    csv_recs = detect_ri_opportunities(
+                        analysis_file, lookup_prices=True, max_price_workers=4,
+                    )
+                    if csv_recs:
+                        logger.info("CSV RI detection: %d opportunities found", len(csv_recs))
+                        # Bridge embedded retail prices into the dict format
+                        # expected by build_savings_analysis  (key = rec index)
+                        csv_retail: dict[int, dict] = {}
+                        for idx, rec in enumerate(csv_recs):
+                            rp = (rec.raw or {}).get("retailPrices")
+                            if rp:
+                                csv_retail[idx] = rp
+                        savings_data = build_savings_analysis(
+                            analysis_file, csv_recs, retail_prices=csv_retail,
+                        )
+                        savings_data["source"] = "csv_detection"
+                        st.session_state["savings_analysis"] = savings_data
+                        st.session_state["csv_recs"] = csv_recs
+                        logger.info("CSV-based savings analysis stored")
+                    else:
+                        logger.info("No RI-eligible SKUs detected from CSV")
+                        st.info(
+                            "No RI / SP-eligible services detected in this billing data. "
+                            "Savings analysis requires usage from services like "
+                            "Virtual Machines, SQL Database, Cosmos DB, App Service, etc."
+                        )
+                except Exception as ex:
+                    logger.warning("CSV RI detection failed (non-fatal): %s", ex, exc_info=True)
+                    st.warning(f"RI / SP opportunity detection encountered an error: {ex}")
+
+            st.toast("Invoice analysis complete.", icon="✅")
+            st.rerun()
         except Exception as ex:
             logger.exception("Invoice analysis failed for %s", selected_file)
             st.error(f"Analysis failed: {ex}")
@@ -558,35 +627,17 @@ if not is_demo and st.button("Fetch Azure Data", type="primary", disabled=not si
 
         commitments = reservations + savings_plans
 
-        # Advisor
+        # Advisor (fetched in parallel for all subscriptions)
         progress.progress(60, text="Fetching Advisor recommendations…")
-        all_recs: list = []
-        for sid in sub_ids:
-            try:
-                all_recs.extend(list_advisor_cost_recommendations(credential, sid))
-            except Exception as ex:
-                logger.warning("Failed Advisor query for subscription %s: %s", sid, ex)
-                warnings.append(_azure_warning("Advisor", ex, sid))
+        all_recs = list_advisor_cost_recommendations_parallel(credential, sub_ids)
 
-        # Cost Management queries (all subscriptions)
+        # Cost Management queries (all subscriptions in parallel)
         progress.progress(80, text="Running Cost Management queries…")
         p_start = st.session_state.get("summary", {}).get("period_start")
         p_end = st.session_state.get("summary", {}).get("period_end")
         cq_rows: list[dict] = []
-        for sid in sub_ids:
-            if p_start and p_end:
-                try:
-                    cq_rows.extend(
-                        query_cost_by_service(
-                            credential=credential,
-                            scope=f"/subscriptions/{sid}",
-                            start_date=f"{p_start}T00:00:00Z",
-                            end_date=f"{p_end}T23:59:59Z",
-                        )
-                    )
-                except Exception as ex:
-                    logger.warning("Cost query failed for subscription %s: %s", sid, ex)
-                    warnings.append(_azure_warning("Cost query", ex, sid))
+        if p_start and p_end:
+            cq_rows = query_cost_by_service_parallel(credential, sub_ids, p_start, p_end)
 
         st.session_state["commitments"] = commitment_rows(commitments)
         st.session_state["recommendations"] = recommendation_rows(all_recs)
@@ -598,14 +649,30 @@ if not is_demo and st.button("Fetch Azure Data", type="primary", disabled=not si
         csv_path = st.session_state.get("csv_path", "")
         if csv_path and all_recs:
             try:
-                savings_data = build_savings_analysis(csv_path, all_recs)
+                # Look up real Azure retail prices for Advisor recommendations
+                progress.progress(90, text="Looking up Azure retail prices…")
+                retail_prices = batch_lookup_prices(all_recs, max_workers=3)
+                if retail_prices:
+                    logger.info("Retail prices found for %d / %d recommendations",
+                                len(retail_prices), len(all_recs))
+                else:
+                    logger.info("No retail prices retrieved — using estimated discount rates")
+
+                savings_data = build_savings_analysis(
+                    csv_path, all_recs, retail_prices=retail_prices,
+                )
+                savings_data["source"] = "advisor"
                 st.session_state["savings_analysis"] = savings_data
             except Exception as ex:
                 logger.exception("Savings analysis failed")
                 warnings.append(f"Savings analysis: {ex}")
-                st.session_state["savings_analysis"] = None
+                # Keep existing CSV-detected savings if available
+                if not st.session_state.get("savings_analysis"):
+                    st.session_state["savings_analysis"] = None
         else:
-            st.session_state["savings_analysis"] = None
+            # No Advisor recs — keep CSV-detected savings if already present
+            if not st.session_state.get("savings_analysis"):
+                st.session_state["savings_analysis"] = None
 
         progress.progress(100, text="Done.")
         logger.info(
@@ -639,101 +706,212 @@ if st.session_state.get("azure_warnings"):
             st.warning(w)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  PAYG vs RI/SP Savings Analysis
+#  PAYG vs RI/SP Savings Analysis — Separate Options
 # ═══════════════════════════════════════════════════════════════════════════════
 if st.session_state.get("savings_analysis"):
     sa = st.session_state["savings_analysis"]
-    kpi = sa.get("kpi", {})
+    ri = sa.get("ri_analysis", {})
+    sp = sa.get("sp_analysis", {})
+    hybrid = sa.get("hybrid_analysis", {})
+    ri_kpi = ri.get("kpi", {})
+    sp_kpi = sp.get("kpi", {})
+    hybrid_kpi = hybrid.get("kpi", {})
     ccy_sa = st.session_state.get("summary", {}).get("currency", "USD")
 
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-    st.markdown("### 💰 &nbsp; Pay-Go vs RI / SP Savings Projection", unsafe_allow_html=True)
+    st.markdown("### 💰 &nbsp; Pay-Go vs Commitment Savings Projections", unsafe_allow_html=True)
+
+    pricing_note = ""
+    if sa.get("has_retail_prices"):
+        n_retail = ri_kpi.get("retail_prices_used", 0)
+        pricing_note = f"  **{n_retail}** recommendation(s) priced via Azure Retail API."
+
+    is_csv_source = sa.get("source") == "csv_detection"
+    n_recs = ri_kpi.get("total_recommendations", 0)
+    if is_csv_source:
+        source_label = f"{n_recs} RI-eligible SKU groups detected from billing CSV"
+    else:
+        source_label = f"{n_recs} Azure Advisor recommendations"
     st.caption(
         f"Based on {sa.get('period_days', 0)}-day invoice run rate extrapolated to 3 years, "
-        f"combined with {kpi.get('total_recommendations', 0)} Azure Advisor recommendations."
+        f"combined with {source_label}."
+        + pricing_note
     )
 
-    # ── Savings headline KPIs ──────────────────────────────────────────────────
-    sk1, sk2, sk3, sk4, sk5 = st.columns(5)
-    sk1.metric("Current 3-Yr Spend (PAYG)", f"{ccy_sa} {kpi.get('current_3yr_spend', 0):,.2f}")
-    sk2.metric("RI/SP 3-Yr Cost", f"{ccy_sa} {kpi.get('ri_sp_3yr_cost', 0):,.2f}")
-    sk3.metric("Total 3-Year Savings", f"{ccy_sa} {kpi.get('total_3yr_savings', 0):,.2f}")
-    sk4.metric("Savings %", f"{kpi.get('savings_pct', 0):.1f}%")
-    sk5.metric("Annual Savings", f"{ccy_sa} {kpi.get('annual_savings', 0):,.2f}")
+    # ── Helper to render one variant's tabs ────────────────────────────────────
+    def _render_variant_tabs(variant_data: dict, prefix: str) -> None:
+        cats = variant_data.get("savings_by_category", [])
+        regions = variant_data.get("savings_by_region", [])
+        opps = variant_data.get("top_opportunities", [])
 
-    # ── Tabs: By Category / By Region / Top Opportunities ─────────────────────
-    tab_cat, tab_rgn, tab_top = st.tabs([
-        "By Resource Type", "By Region", "Top Opportunities",
-    ])
+        tab_cat, tab_rgn, tab_top = st.tabs([
+            f"{prefix} By Resource Type",
+            f"{prefix} By Region",
+            f"{prefix} Top Opportunities",
+        ])
 
-    with tab_cat:
-        cats = sa.get("savings_by_category", [])
-        if cats:
-            cat_df = pd.DataFrame(cats)
-            left, right = st.columns([1, 1])
-            with left:
-                chart_df = cat_df[["Resource Type", "Net Savings (3-Yr)"]].copy()
-                chart_df = chart_df[chart_df["Net Savings (3-Yr)"] > 0].head(15)
-                if not chart_df.empty:
-                    st.bar_chart(chart_df.set_index("Resource Type")["Net Savings (3-Yr)"])
-            with right:
+        with tab_cat:
+            if cats:
+                cat_df = pd.DataFrame(cats)
+                left, right = st.columns([1, 1])
+                with left:
+                    chart_df = cat_df[["Resource Type", "Savings (3-Yr)"]].copy()
+                    chart_df = chart_df[chart_df["Savings (3-Yr)"] > 0].head(15)
+                    if not chart_df.empty:
+                        st.bar_chart(chart_df.set_index("Resource Type"))
+                with right:
+                    st.dataframe(
+                        cat_df.style.format({
+                            "Current 3-Yr Cost": "${:,.2f}",
+                            "Commitment 3-Yr Cost": "${:,.2f}",
+                            "Savings (3-Yr)": "${:,.2f}",
+                            "Annual Savings": "${:,.2f}",
+                            "Monthly Savings": "${:,.2f}",
+                            "Savings %": "{:.1f}%",
+                            "% of Total Savings": "{:.1f}%",
+                        }),
+                        use_container_width=True, hide_index=True,
+                    )
+            else:
+                st.info("No category-level savings data available.")
+
+        with tab_rgn:
+            if regions:
+                rgn_df = pd.DataFrame(regions)
+                left, right = st.columns([1, 1])
+                with left:
+                    chart_df = rgn_df[["Region", "Savings (3-Yr)"]].copy()
+                    chart_df = chart_df[chart_df["Savings (3-Yr)"] > 0]
+                    if not chart_df.empty:
+                        st.bar_chart(chart_df.set_index("Region"))
+                with right:
+                    st.dataframe(
+                        rgn_df.style.format({
+                            "Current 3-Yr Cost": "${:,.2f}",
+                            "Commitment 3-Yr Cost": "${:,.2f}",
+                            "Savings (3-Yr)": "${:,.2f}",
+                            "Annual Savings": "${:,.2f}",
+                            "Savings %": "{:.1f}%",
+                            "% of Total Savings": "{:.1f}%",
+                        }),
+                        use_container_width=True, hide_index=True,
+                    )
+            else:
+                st.info("No region-level savings data available.")
+
+        with tab_top:
+            if opps:
+                opp_df = pd.DataFrame(opps)
+                display_cols = [c for c in opp_df.columns if c != "Description"]
                 st.dataframe(
-                    cat_df.style.format({
+                    opp_df[display_cols].style.format({
                         "Current 3-Yr Cost": "${:,.2f}",
-                        "RI/SP 3-Yr Cost": "${:,.2f}",
-                        "Net Savings (3-Yr)": "${:,.2f}",
+                        "Commitment 3-Yr Cost": "${:,.2f}",
+                        "Savings (3-Yr)": "${:,.2f}",
                         "Annual Savings": "${:,.2f}",
-                        "Monthly Savings": "${:,.2f}",
                         "Savings %": "{:.1f}%",
-                        "% of Total Savings": "{:.1f}%",
                     }),
                     use_container_width=True, hide_index=True,
                 )
-        else:
-            st.info("No category-level savings data available.")
+            else:
+                st.info("No opportunity data available.")
 
-    with tab_rgn:
-        regions = sa.get("savings_by_region", [])
-        if regions:
-            rgn_df = pd.DataFrame(regions)
-            left, right = st.columns([1, 1])
-            with left:
-                chart_df = rgn_df[["Region", "Net Savings (3-Yr)"]].copy()
-                chart_df = chart_df[chart_df["Net Savings (3-Yr)"] > 0]
-                if not chart_df.empty:
-                    st.bar_chart(chart_df.set_index("Region")["Net Savings (3-Yr)"])
-            with right:
-                st.dataframe(
-                    rgn_df.style.format({
-                        "Current 3-Yr Cost": "${:,.2f}",
-                        "RI/SP 3-Yr Cost": "${:,.2f}",
-                        "Net Savings (3-Yr)": "${:,.2f}",
-                        "Annual Savings": "${:,.2f}",
-                        "Savings %": "{:.1f}%",
-                        "% of Total Savings": "{:.1f}%",
-                    }),
-                    use_container_width=True, hide_index=True,
-                )
-        else:
-            st.info("No region-level savings data available.")
+    # ── Hybrid strategy toggle ─────────────────────────────────────────────────
+    show_hybrid = st.toggle(
+        "🔀 Hybrid Strategy — SP for compute + RI for everything else",
+        value=False,
+        help=(
+            "Combines Savings Plan rates for compute-eligible services "
+            "(VMs, App Service, AKS, Functions) with Reserved Instance rates "
+            "for SP-ineligible services (SQL DB, Cosmos DB, Redis, etc.)."
+        ),
+    )
 
-    with tab_top:
-        opps = sa.get("top_opportunities", [])
-        if opps:
-            opp_df = pd.DataFrame(opps)
-            display_cols = [c for c in opp_df.columns if c != "Description"]
-            st.dataframe(
-                opp_df[display_cols].style.format({
-                    "Current 3-Yr Cost": "${:,.2f}",
-                    "RI/SP 3-Yr Cost": "${:,.2f}",
-                    "Net Savings (3-Yr)": "${:,.2f}",
-                    "Annual Savings": "${:,.2f}",
-                    "Savings %": "{:.1f}%",
-                }),
-                use_container_width=True, hide_index=True,
+    if show_hybrid and hybrid_kpi:
+        # ── Single-column hybrid headline ──────────────────────────────────────
+        st.markdown("#### Hybrid Strategy — Savings Plan + Reserved Instances")
+        h_rate_src = hybrid_kpi.get("discount_rate_source", "estimated")
+        h_rate_label = (
+            "Retail API" if h_rate_src == "retail"
+            else "mixed Retail + est." if h_rate_src == "mixed"
+            else "estimated"
+        )
+        n_sp_recs = hybrid_kpi.get("sp_eligible_recs", 0)
+        n_ri_recs = hybrid_kpi.get("ri_only_recs", 0)
+        st.caption(
+            f"{hybrid_kpi.get('discount_rate', 0) * 100:.0f}% weighted avg discount ({h_rate_label}) · "
+            f"{n_sp_recs} SP-eligible + {n_ri_recs} RI-only recommendations · 3-year term"
+        )
+
+        col_h1, col_h2, col_h3 = st.columns(3)
+        with col_h1:
+            st.metric("Current 3-Yr Spend (PAYG)",
+                       f"{ccy_sa} {hybrid_kpi.get('current_3yr_spend', 0):,.2f}")
+        with col_h2:
+            st.metric("Hybrid 3-Yr Cost",
+                       f"{ccy_sa} {hybrid_kpi.get('commitment_3yr_cost', 0):,.2f}",
+                       delta=f"-{ccy_sa} {hybrid_kpi.get('total_3yr_savings', 0):,.2f}",
+                       delta_color="inverse")
+        with col_h3:
+            st.metric("Annual Hybrid Savings",
+                       f"{ccy_sa} {hybrid_kpi.get('annual_savings', 0):,.2f}")
+
+        # ── Comparison row: Pure RI vs Pure SP vs Hybrid ───────────────────────
+        st.markdown("###### Strategy Comparison")
+        cmp_cols = st.columns(3)
+        with cmp_cols[0]:
+            st.metric("Pure RI Savings (3-Yr)",
+                       f"{ccy_sa} {ri_kpi.get('total_3yr_savings', 0):,.2f}")
+        with cmp_cols[1]:
+            st.metric("Pure SP Savings (3-Yr)",
+                       f"{ccy_sa} {sp_kpi.get('total_3yr_savings', 0):,.2f}")
+        with cmp_cols[2]:
+            st.metric("Hybrid Savings (3-Yr)",
+                       f"{ccy_sa} {hybrid_kpi.get('total_3yr_savings', 0):,.2f}")
+
+        with st.expander("**Hybrid Strategy** (detail)", expanded=True):
+            _render_variant_tabs(hybrid, "Hybrid")
+
+    else:
+        col_ri, col_sp = st.columns(2)
+        with col_ri:
+            st.markdown("#### Option A — Reserved Instances")
+            ri_rate_src = ri_kpi.get("discount_rate_source", "estimated")
+            ri_rate_label = (
+                "Retail API" if ri_rate_src == "retail"
+                else "mixed Retail + est." if ri_rate_src == "mixed"
+                else "estimated"
             )
-        else:
-            st.info("No opportunity data available.")
+            st.caption(
+                f"{ri_kpi.get('discount_rate', 0.40) * 100:.0f}% avg discount ({ri_rate_label}) · "
+                f"Locked to specific SKU + region · 3-year term"
+            )
+            st.metric("Current 3-Yr Spend (PAYG)", f"{ccy_sa} {ri_kpi.get('current_3yr_spend', 0):,.2f}")
+            st.metric("RI 3-Yr Cost", f"{ccy_sa} {ri_kpi.get('commitment_3yr_cost', 0):,.2f}",
+                       delta=f"-{ccy_sa} {ri_kpi.get('total_3yr_savings', 0):,.2f}", delta_color="inverse")
+            st.metric("Annual RI Savings", f"{ccy_sa} {ri_kpi.get('annual_savings', 0):,.2f}")
+        with col_sp:
+            st.markdown("#### Option B — Savings Plans")
+            sp_rate_src = sp_kpi.get("discount_rate_source", "estimated")
+            sp_rate_label = (
+                "Retail API" if sp_rate_src == "retail"
+                else "mixed Retail + est." if sp_rate_src == "mixed"
+                else "estimated"
+            )
+            st.caption(
+                f"{sp_kpi.get('discount_rate', 0.30) * 100:.0f}% avg discount ({sp_rate_label}) · "
+                f"Flexible across SKU / region · 3-year term"
+            )
+            st.metric("Current 3-Yr Spend (PAYG)", f"{ccy_sa} {sp_kpi.get('current_3yr_spend', 0):,.2f}")
+            st.metric("SP 3-Yr Cost", f"{ccy_sa} {sp_kpi.get('commitment_3yr_cost', 0):,.2f}",
+                       delta=f"-{ccy_sa} {sp_kpi.get('total_3yr_savings', 0):,.2f}", delta_color="inverse")
+            st.metric("Annual SP Savings", f"{ccy_sa} {sp_kpi.get('annual_savings', 0):,.2f}")
+
+        with st.expander("**Option A — Reserved Instances** (detail)", expanded=True):
+            _render_variant_tabs(ri, "RI")
+        with st.expander("**Option B — Savings Plans** (detail)", expanded=False):
+            _render_variant_tabs(sp, "SP")
+
 
 # ── Commitment detail ──────────────────────────────────────────────────────────
 if st.session_state.get("commitments"):
@@ -780,3 +958,19 @@ if "summary" in st.session_state:
             )
 else:
     st.info("Analyze an invoice export first to enable report generation.")
+
+# ── Disclaimer footer ──────────────────────────────────────────────────────────
+st.markdown("<hr style='margin-top:2rem;'>", unsafe_allow_html=True)
+st.markdown(
+    '<div style="font-size:0.75rem; color:#888; line-height:1.4; padding:0.5rem 0 1rem;">'
+    '⚠️ <b>Disclaimer:</b> All analysis, savings estimates, and recommendations '
+    'presented by Azure MACC Analyst are for <b>estimation and demonstrative '
+    'purposes only</b>. Figures are approximations based on publicly available '
+    'Azure retail pricing data and standard discount assumptions. '
+    '<b>No guarantees</b> are provided regarding the accuracy, completeness, '
+    'or realisation of projected savings. This tool does not constitute financial '
+    'advice. Always validate findings with your Microsoft account team and '
+    'conduct your own due diligence before making any commitment or purchasing '
+    'decisions.</div>',
+    unsafe_allow_html=True,
+)
