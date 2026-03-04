@@ -443,7 +443,7 @@ if _file_is_new:
             with st.spinner("Detecting RI / SP opportunities from CSV…"):
                 try:
                     csv_recs = detect_ri_opportunities(
-                        analysis_file, lookup_prices=True, max_price_workers=4,
+                        analysis_file, lookup_prices=True,
                     )
                     if csv_recs:
                         logger.info("CSV RI detection: %d opportunities found", len(csv_recs))

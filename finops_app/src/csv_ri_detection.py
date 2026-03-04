@@ -184,7 +184,7 @@ def detect_ri_opportunities(
     *,
     min_annual_cost: float | None = None,
     lookup_prices: bool = True,
-    max_price_workers: int = 3,
+    max_price_workers: int | None = None,
 ) -> list[AzureRecommendation]:
     """Scan an Azure billing CSV and return synthetic RI/SP recommendations.
 
@@ -195,6 +195,8 @@ def detect_ri_opportunities(
         lookup_prices:  Whether to call the Retail Prices API for each
                         detected opportunity.
         max_price_workers:  Max parallel threads for retail price lookups.
+                            Defaults to the ``CSV_RI_MAX_PRICE_WORKERS``
+                            environment variable (default: 2).
 
     Returns:
         A list of `AzureRecommendation` objects, one per detected SKU+region,
@@ -204,6 +206,8 @@ def detect_ri_opportunities(
     """
     if min_annual_cost is None:
         min_annual_cost = float(os.getenv("CSV_RI_MIN_ANNUAL_COST", "100"))
+    if max_price_workers is None:
+        max_price_workers = int(os.getenv("CSV_RI_MAX_PRICE_WORKERS", "2"))
 
     logger.info("detect_ri_opportunities: file=%s, min_annual=$%.0f, lookup=%s",
                 file_path, min_annual_cost, lookup_prices)

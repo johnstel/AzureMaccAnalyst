@@ -99,6 +99,20 @@ Set these in your environment or `.env` file:
 | `AZURE_MAX_EXCEL_MB` | `8192` | Warning threshold for very large Excel files (in MB). |
 | `AZURE_BLOCK_OVERSIZED_EXCEL` | `false` | `true` = block files above threshold; `false` = warn and continue. |
 
+---
+
+## Reliability / Performance Tuning
+
+Operators can tune the Azure Retail Prices API lookup behaviour without any code changes by setting these environment variables.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RETAIL_PRICING_TIMEOUT` | `30` | Per-request HTTP timeout in seconds for the Azure Retail Prices API. Increase on high-latency networks. |
+| `RETAIL_PRICING_MAX_WORKERS` | `3` | Max parallel threads used by the **Advisor-path** retail price batch lookup. Reduce if you see transient network errors on large recommendation sets. |
+| `CSV_RI_MAX_PRICE_WORKERS` | `2` | Max parallel threads used by the **CSV RI-detection path** retail price lookups. A lower default reduces network pressure on large billing exports. |
+
+These knobs can also be combined with existing variables like `CSV_RI_MIN_ANNUAL_COST` (default: `100`) and `RI_DISCOUNT_RATE` / `SP_DISCOUNT_RATE` to control analysis thresholds.
+
 ### Performance expectations (5 GB .xlsx, ~10M rows)
 
 | Scenario | Conversion Time | Intermediate Size | Analysis Time |
