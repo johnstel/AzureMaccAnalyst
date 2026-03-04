@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -25,6 +26,13 @@ import requests
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# ── In-run price cache ────────────────────────────────────────────────────────
+# Keyed by (service_name, sku_name, arm_region); populated on first lookup and
+# reused for the lifetime of the process.  A threading.Lock guards concurrent
+# reads/writes from the ThreadPoolExecutor used in batch_lookup_prices.
+_price_cache: dict[tuple[str, str, str], dict[str, float | None]] = {}
+_cache_lock = threading.Lock()
 
 _RETAIL_API = "https://prices.azure.com/api/retail/prices"
 _PAGE_SIZE = 100  # max results per page
@@ -182,6 +190,21 @@ def lookup_sku_prices(
         ri_3yr_savings_pct, sp_3yr_savings_pct
     Any value may be None if price data is unavailable.
     """
+    cache_key = (service_name, sku_name, arm_region)
+    with _cache_lock:
+        cached = _price_cache.get(cache_key)
+    if cached is not None:
+        logger.debug(
+            "Cache hit for retail price lookup: service=%r, sku=%r, region=%r",
+            service_name, sku_name, arm_region,
+        )
+        return cached
+
+    logger.debug(
+        "Cache miss for retail price lookup: service=%r, sku=%r, region=%r",
+        service_name, sku_name, arm_region,
+    )
+
     result: dict[str, float | None] = {
         "payg_unit_price": None,
         "ri_3yr_unit_price": None,
@@ -267,6 +290,9 @@ def lookup_sku_prices(
         if sp_retail is not None:
             sp_hourly = sp_retail / HOURS_3YR
             result["sp_3yr_savings_pct"] = round((1 - sp_hourly / payg_retail) * 100, 1)
+
+    with _cache_lock:
+        _price_cache[cache_key] = result
 
     return result
 
