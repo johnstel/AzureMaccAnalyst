@@ -77,6 +77,7 @@ _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 # ── Logger factory ─────────────────────────────────────────────────────────────
 
 _configured = False
+_banner_logged = False
 
 
 def _configure_root() -> None:
@@ -121,3 +122,19 @@ def get_logger(name: str) -> logging.Logger:
     # Map module names like "src.azure_clients" → "macc.azure_clients"
     short = name.replace("src.", "").replace("__main__", "app")
     return logging.getLogger(f"macc.{short}")
+
+
+def log_startup_banner(logger: logging.Logger) -> None:
+    """Emit the application startup banner exactly once per process.
+
+    Streamlit re-runs the entire script on every user interaction, so a bare
+    ``logger.info(...)`` call at module level would fire on each rerun.  This
+    function uses a module-level flag (backed by the module cache in
+    ``sys.modules``) to ensure the banner is only written once for the lifetime
+    of the Python process.
+    """
+    global _banner_logged
+    if _banner_logged:
+        return
+    _banner_logged = True
+    logger.info("========== Application starting ==========")
