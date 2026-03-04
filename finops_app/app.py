@@ -17,10 +17,10 @@ except ImportError:
 import pandas as pd
 import streamlit as st
 
-from src.logging_config import get_logger
+from src.logging_config import get_logger, log_startup_banner
 
 logger = get_logger("app")
-logger.info("========== Application starting ==========")
+log_startup_banner(logger)
 
 from src.analysis import (
     build_recommendation_summary,
