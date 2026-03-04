@@ -21,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .logging_config import get_logger
 
@@ -30,6 +32,29 @@ _RETAIL_API = "https://prices.azure.com/api/retail/prices"
 _PAGE_SIZE = 100  # max results per page
 _MAX_PAGES = 5  # safety cap per query
 _REQUEST_TIMEOUT = int(os.getenv("RETAIL_PRICING_TIMEOUT", "15"))
+_RETAIL_PRICING_RETRIES = int(os.getenv("RETAIL_PRICING_RETRIES", "3"))
+
+
+def _build_session() -> requests.Session:
+    """Build a requests.Session with retry/backoff for the Retail Prices API.
+
+    Retries on transient HTTP errors (429, 500, 502, 503, 504) and on
+    connection/read errors, with exponential backoff between attempts.
+    """
+    retry = Retry(
+        total=_RETAIL_PRICING_RETRIES,
+        backoff_factor=1,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+_session = _build_session()
 
 # ── Mapping from Advisor resource-provider segments to Retail API serviceName ─
 _PROVIDER_TO_SERVICE: dict[str, str] = {
@@ -115,7 +140,12 @@ def _build_filter(
 
 
 def _query_retail_prices(odata_filter: str) -> list[dict[str, Any]]:
-    """Execute a paginated query against the Retail Prices API."""
+    """Execute a paginated query against the Retail Prices API.
+
+    Uses a shared session with automatic retry/backoff for transient
+    network and HTTP errors (429, 5xx, connect, read).  Only logs a
+    warning after all retry attempts are exhausted.
+    """
     results: list[dict[str, Any]] = []
     url = _RETAIL_API
     params: dict[str, str] = {
@@ -124,11 +154,15 @@ def _query_retail_prices(odata_filter: str) -> list[dict[str, Any]]:
 
     for page in range(_MAX_PAGES):
         try:
-            resp = requests.get(url, params=params, timeout=_REQUEST_TIMEOUT)
+            resp = _session.get(url, params=params, timeout=_REQUEST_TIMEOUT)
             resp.raise_for_status()
             data = resp.json()
         except Exception as ex:
-            logger.warning("Retail pricing query failed (page %d): %s — filter: %s", page, ex, odata_filter)
+            # The session already exhausted its retries; log at warning level.
+            logger.warning(
+                "Retail pricing query failed after retries (page %d): %s — filter: %s",
+                page, ex, odata_filter,
+            )
             break
 
         items = data.get("Items", [])
