@@ -29,7 +29,8 @@ logger = get_logger(__name__)
 _RETAIL_API = "https://prices.azure.com/api/retail/prices"
 _PAGE_SIZE = 100  # max results per page
 _MAX_PAGES = 5  # safety cap per query
-_REQUEST_TIMEOUT = int(os.getenv("RETAIL_PRICING_TIMEOUT", "15"))
+_REQUEST_TIMEOUT = int(os.getenv("RETAIL_PRICING_TIMEOUT", "30"))
+_MAX_WORKERS = int(os.getenv("RETAIL_PRICING_MAX_WORKERS", "3"))
 
 # ── Mapping from Advisor resource-provider segments to Retail API serviceName ─
 _PROVIDER_TO_SERVICE: dict[str, str] = {
@@ -368,7 +369,7 @@ def _extract_advisor_sku_info(rec: Any) -> dict[str, str]:
 
 def batch_lookup_prices(
     recommendations: list[Any],
-    max_workers: int = 3,
+    max_workers: int | None = None,
 ) -> dict[int, dict[str, float | None]]:
     """Look up retail prices for a list of Advisor recommendations.
 
@@ -376,7 +377,12 @@ def batch_lookup_prices(
     Only performs lookups where we have enough info (service + SKU + region).
     Uses threading for parallelism with a conservative worker count since
     the Retail API is public and rate limits are generous.
+
+    ``max_workers`` defaults to the ``RETAIL_PRICING_MAX_WORKERS`` environment
+    variable (default: 3).
     """
+    if max_workers is None:
+        max_workers = _MAX_WORKERS
     tasks: list[tuple[int, str, str, str]] = []
     for idx, rec in enumerate(recommendations):
         info = _extract_advisor_sku_info(rec)
